@@ -73,6 +73,26 @@ type MetaAccountsResponse = {
 
 type MetaPageRaw = NonNullable<MetaAccountsResponse["data"]>[number];
 
+type MetaSubscribedAppsResponse = {
+  error?: {
+    code?: number;
+    error_subcode?: number;
+    fbtrace_id?: string;
+    message?: string;
+    type?: string;
+  };
+  success?: boolean;
+};
+
+type ChannelSettings = Record<string, unknown>;
+
+type FacebookChannelRow = {
+  access_token: string | null;
+  channel_id: string | null;
+  id: string;
+  settings: ChannelSettings | null;
+};
+
 type MetaPageDirectFetchResult = {
   ok: boolean;
   page: MetaPageAccount | null;
@@ -115,6 +135,7 @@ const pageRelatedScopes = new Set([
 const metaStorageSchema = "public";
 const metaOAuthSessionsTable = "meta_oauth_sessions";
 const metaIntegrationsTable = "meta_integrations";
+const subscribedAppsGraphVersion = "v19.0";
 
 export async function getAuthenticatedMetaCompany(supabase: SupabaseClient) {
   const {
@@ -607,39 +628,52 @@ export async function saveMetaIntegration({
     });
   }
 
-  const { error: facebookChannelError } = await admin.from("channels").upsert(
-    {
-      access_token: input.pageAccessToken,
-      channel_id: input.pageId,
-      channel_name: input.pageName,
-      company_id: companyId,
-      connected_at: connectedAt,
-      external_id: input.pageId,
-      is_active: true,
-      is_connected: true,
-      name: "Facebook",
-      platform: "facebook",
-      settings: {
+  const { data: facebookChannel, error: facebookChannelError } = await admin
+    .from("channels")
+    .upsert(
+      {
+        access_token: input.pageAccessToken,
+        channel_id: input.pageId,
+        channel_name: input.pageName,
+        company_id: companyId,
         connected_at: connectedAt,
-        instagram_id: input.instagramId,
-        instagram_username: input.instagramUsername,
-        meta_integration_id: integration.id,
-        page_id: input.pageId,
-        page_name: input.pageName,
-        provider: input.provider,
+        external_id: input.pageId,
+        is_active: true,
+        is_connected: true,
+        name: "Facebook",
+        platform: "facebook",
+        settings: {
+          connected_at: connectedAt,
+          instagram_id: input.instagramId,
+          instagram_username: input.instagramUsername,
+          meta_integration_id: integration.id,
+          page_id: input.pageId,
+          page_name: input.pageName,
+          provider: input.provider,
+        },
+        type: "social",
       },
-      type: "social",
-    },
-    {
-      onConflict: "company_id,platform,channel_id",
-    },
-  );
+      {
+        onConflict: "company_id,platform,channel_id",
+      },
+    )
+    .select("id, channel_id, access_token, settings")
+    .single<FacebookChannelRow>();
 
   if (facebookChannelError) {
     throw new Error(facebookChannelError.message);
   }
 
   savedChannels.push("facebook");
+
+  if (facebookChannel?.channel_id && facebookChannel.access_token) {
+    await subscribeFacebookPageWebhook({
+      channelId: facebookChannel.id,
+      existingSettings: facebookChannel.settings,
+      pageAccessToken: facebookChannel.access_token,
+      pageId: facebookChannel.channel_id,
+    });
+  }
 
   if (input.instagramId) {
     const { error: instagramChannelError } = await admin.from("channels").upsert(
@@ -682,6 +716,140 @@ export async function saveMetaIntegration({
     integrationId: integration.id as string,
     provider: input.provider,
   };
+}
+
+export async function subscribeConnectedFacebookWebhook({
+  companyId,
+}: {
+  companyId: string;
+}) {
+  const admin = createAdminClient();
+  const { data: channel, error } = await admin
+    .from("channels")
+    .select("id, channel_id, access_token, settings")
+    .eq("company_id", companyId)
+    .eq("platform", "facebook")
+    .eq("is_connected", true)
+    .order("connected_at", { ascending: false, nullsFirst: false })
+    .limit(1)
+    .single<FacebookChannelRow>();
+
+  if (error || !channel) {
+    throw new Error(error?.message ?? "No connected Facebook Page was found.");
+  }
+
+  if (!channel.channel_id || !channel.access_token) {
+    throw new Error("Connected Facebook Page is missing its page access token.");
+  }
+
+  const subscription = await subscribeFacebookPageWebhook({
+    channelId: channel.id,
+    existingSettings: channel.settings,
+    pageAccessToken: channel.access_token,
+    pageId: channel.channel_id,
+  });
+
+  if (!subscription.ok) {
+    throw Object.assign(
+      new Error(
+        subscription.payload.error?.message ??
+          "Unable to subscribe Facebook Page webhook.",
+      ),
+      {
+        metaError: subscription.payload.error ?? null,
+        status: subscription.status,
+      },
+    );
+  }
+
+  return {
+    channelId: channel.id,
+    pageId: channel.channel_id,
+    response: subscription.payload,
+    subscribedAt: subscription.subscribedAt,
+  };
+}
+
+async function subscribeFacebookPageWebhook({
+  channelId,
+  existingSettings,
+  pageAccessToken,
+  pageId,
+}: {
+  channelId: string;
+  existingSettings: ChannelSettings | null;
+  pageAccessToken: string;
+  pageId: string;
+}) {
+  const url = new URL(
+    `https://graph.facebook.com/${subscribedAppsGraphVersion}/${pageId}/subscribed_apps`,
+  );
+
+  url.searchParams.set("access_token", pageAccessToken);
+
+  const response = await fetch(url, {
+    cache: "no-store",
+    method: "POST",
+  });
+  const payload = (await response.json()) as MetaSubscribedAppsResponse;
+
+  logMetaWebhookSubscription({
+    channelId,
+    metaError: payload.error ?? null,
+    pageId,
+    response: payload,
+  });
+
+  if (!response.ok || payload.error) {
+    return {
+      ok: false,
+      payload,
+      status: response.status,
+      subscribedAt: null,
+    };
+  }
+
+  const subscribedAt = new Date().toISOString();
+  const { error: updateError } = await createAdminClient()
+    .from("channels")
+    .update({
+      settings: {
+        ...(existingSettings ?? {}),
+        webhook_subscribed: true,
+        webhook_subscribed_at: subscribedAt,
+      },
+    })
+    .eq("id", channelId);
+
+  if (updateError) {
+    throw new Error(updateError.message);
+  }
+
+  return {
+    ok: true,
+    payload,
+    status: response.status,
+    subscribedAt,
+  };
+}
+
+function logMetaWebhookSubscription({
+  channelId,
+  metaError,
+  pageId,
+  response,
+}: {
+  channelId: string;
+  metaError: MetaSubscribedAppsResponse["error"] | null;
+  pageId: string;
+  response: MetaSubscribedAppsResponse;
+}) {
+  console.info("[meta-webhook] Facebook subscribed_apps response.", {
+    channel_id: channelId,
+    meta_error_response: metaError,
+    page_id: pageId,
+    subscribed_apps_response: response,
+  });
 }
 
 function readMetaEnv(key: string) {

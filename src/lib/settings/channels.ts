@@ -7,6 +7,8 @@ export type ConnectedChannel = {
   connectedAt: string | null;
   isConnected: boolean;
   platform: "facebook" | "instagram" | "tiktok";
+  webhookSubscribed: boolean;
+  webhookSubscribedAt: string | null;
 };
 
 type ChannelRow = {
@@ -17,6 +19,10 @@ type ChannelRow = {
   is_connected: boolean | null;
   name: string;
   platform: string | null;
+  settings: {
+    webhook_subscribed?: unknown;
+    webhook_subscribed_at?: unknown;
+  } | null;
 };
 
 export async function getConnectedChannels({
@@ -30,7 +36,7 @@ export async function getConnectedChannels({
   const { data, error } = await supabase
     .from("channels")
     .select(
-      "platform,channel_id,channel_name,external_id,name,connected_at,is_connected",
+      "platform,channel_id,channel_name,external_id,name,connected_at,is_connected,settings",
     )
     .eq("company_id", companyId)
     .in("platform", ["facebook", "instagram", "tiktok"])
@@ -48,6 +54,11 @@ export async function getConnectedChannels({
       connectedAt: channel.connected_at,
       isConnected: channel.is_connected ?? false,
       platform: channel.platform as ConnectedChannel["platform"],
+      webhookSubscribed: channel.settings?.webhook_subscribed === true,
+      webhookSubscribedAt:
+        typeof channel.settings?.webhook_subscribed_at === "string"
+          ? channel.settings.webhook_subscribed_at
+          : null,
     }));
 }
 

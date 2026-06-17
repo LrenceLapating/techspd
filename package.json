@@ -22,7 +22,8 @@
     "verify:step14": "node scripts/verify-step14.mjs",
     "verify:step15": "node scripts/verify-step15.mjs",
     "verify:meta-debug": "node scripts/verify-meta-callback-debug.mjs",
-    "verify:all": "npm run verify:step2 && npm run verify:step3 && npm run verify:step4 && npm run verify:step5 && npm run verify:step6 && npm run verify:step7 && npm run verify:step8 && npm run verify:step9 && npm run verify:step10 && npm run verify:step11 && npm run verify:step12 && npm run verify:step13 && npm run verify:step14 && npm run verify:step15 && npm run verify:meta-debug && npm run lint && npm run build"
+    "verify:meta-webhook-subscription": "node scripts/verify-meta-webhook-subscription.mjs",
+    "verify:all": "npm run verify:step2 && npm run verify:step3 && npm run verify:step4 && npm run verify:step5 && npm run verify:step6 && npm run verify:step7 && npm run verify:step8 && npm run verify:step9 && npm run verify:step10 && npm run verify:step11 && npm run verify:step12 && npm run verify:step13 && npm run verify:step14 && npm run verify:step15 && npm run verify:meta-debug && npm run verify:meta-webhook-subscription && npm run lint && npm run build"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.3.0",

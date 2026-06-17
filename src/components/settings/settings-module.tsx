@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { MetaConnectButton } from "@/components/settings/meta-connect-button";
+import { WebhookSubscribeButton } from "@/components/settings/webhook-subscribe-button";
 import { Separator } from "@/components/ui/separator";
 import type { ConnectedChannel } from "@/lib/settings/channels";
 import { cn } from "@/lib/utils";
@@ -108,6 +109,8 @@ export function SettingsModule({
       name: connected?.channelName ?? channel.name,
       platformName: channel.name,
       status: connected?.isConnected ? "Connected" : "Not Connected",
+      webhookSubscribed: connected?.webhookSubscribed ?? false,
+      webhookSubscribedAt: connected?.webhookSubscribedAt ?? null,
     };
   });
 
@@ -200,6 +203,8 @@ function ChannelCard({
   name,
   platformName,
   status,
+  webhookSubscribed,
+  webhookSubscribedAt,
 }: {
   button: string;
   channelId: string;
@@ -209,6 +214,8 @@ function ChannelCard({
   name: string;
   platformName: string;
   status: string;
+  webhookSubscribed: boolean;
+  webhookSubscribedAt: string | null;
 }) {
   const connected = status === "Connected";
 
@@ -244,6 +251,16 @@ function ChannelCard({
             <dd className="text-xs font-medium">{formatConnectedAt(connectedAt)}</dd>
           </div>
         ) : null}
+        {platformName === "Facebook" ? (
+          <div className="flex items-center justify-between gap-3">
+            <dt className="text-muted-foreground">Webhook</dt>
+            <dd className="text-xs font-medium">
+              {webhookSubscribed
+                ? `Subscribed${webhookSubscribedAt ? ` ${formatConnectedAt(webhookSubscribedAt)}` : ""}`
+                : "Not subscribed"}
+            </dd>
+          </div>
+        ) : null}
       </dl>
 
       {isMetaConnectHref(href) ? (
@@ -254,6 +271,13 @@ function ChannelCard({
           {button}
         </Button>
       )}
+
+      {platformName === "Facebook" ? (
+        <WebhookSubscribeButton
+          disabled={!connected}
+          isSubscribed={webhookSubscribed}
+        />
+      ) : null}
     </div>
   );
 }
