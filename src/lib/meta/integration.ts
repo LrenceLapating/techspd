@@ -63,12 +63,26 @@ type MetaAccountsResponse = {
   };
 };
 
+type MetaPageRaw = NonNullable<MetaAccountsResponse["data"]>[number];
+
+type MetaPageDirectFetchResult = {
+  ok: boolean;
+  page: MetaPageAccount | null;
+  pageId: string;
+  payload: MetaAccountsResponse | MetaPageRaw;
+  status: number;
+};
+
 type MetaDebugTokenResponse = {
   data?: {
     app_id?: string;
     application?: string;
     data_access_expires_at?: number;
     expires_at?: number;
+    granular_scopes?: Array<{
+      scope?: string;
+      target_ids?: string[];
+    }>;
     is_valid?: boolean;
     scopes?: string[];
     type?: string;
@@ -80,6 +94,15 @@ type MetaDebugTokenResponse = {
     type?: string;
   };
 };
+
+const pageRelatedScopes = new Set([
+  "pages_show_list",
+  "pages_messaging",
+  "pages_read_engagement",
+  "pages_manage_metadata",
+  "pages_manage_engagement",
+  "pages_read_user_content",
+]);
 
 export async function getAuthenticatedMetaCompany(supabase: SupabaseClient) {
   const {
@@ -293,6 +316,74 @@ export async function fetchMetaAccountsRaw(accessToken: string) {
   };
 }
 
+export function extractGranularPageTargetIds(
+  tokenDebugInfo: MetaDebugTokenResponse,
+) {
+  const targetIds = new Set<string>();
+
+  for (const granularScope of tokenDebugInfo.data?.granular_scopes ?? []) {
+    if (!granularScope.scope || !pageRelatedScopes.has(granularScope.scope)) {
+      continue;
+    }
+
+    for (const targetId of granularScope.target_ids ?? []) {
+      if (targetId.trim()) {
+        targetIds.add(targetId.trim());
+      }
+    }
+  }
+
+  return [...targetIds];
+}
+
+export async function fetchMetaPagesByTargetIds({
+  accessToken,
+  targetIds,
+}: {
+  accessToken: string;
+  targetIds: string[];
+}) {
+  const results = await Promise.all(
+    targetIds.map((pageId) => fetchMetaPageById({ accessToken, pageId })),
+  );
+
+  return {
+    pages: results.flatMap((result) => (result.page ? [result.page] : [])),
+    results,
+  };
+}
+
+async function fetchMetaPageById({
+  accessToken,
+  pageId,
+}: {
+  accessToken: string;
+  pageId: string;
+}): Promise<MetaPageDirectFetchResult> {
+  const url = new URL(`https://graph.facebook.com/v19.0/${pageId}`);
+
+  url.searchParams.set(
+    "fields",
+    "id,name,access_token,instagram_business_account{id,username}",
+  );
+  url.searchParams.set("access_token", accessToken);
+
+  const response = await fetch(url, {
+    cache: "no-store",
+  });
+  const payload = (await response.json()) as
+    | MetaAccountsResponse
+    | MetaPageRaw;
+
+  return {
+    ok: response.ok,
+    page: response.ok ? mapMetaPage(payload) : null,
+    pageId,
+    payload,
+    status: response.status,
+  };
+}
+
 export async function debugMetaToken(accessToken: string) {
   const appId = readMetaEnv("META_APP_ID");
   const appSecret = readMetaEnv("META_APP_SECRET");
@@ -320,17 +411,33 @@ export async function debugMetaToken(accessToken: string) {
 function mapMetaPages(payload: MetaAccountsResponse) {
   return (payload.data ?? [])
     .filter((page) => page.id && page.name && page.access_token)
-    .map((page) => ({
-      accessToken: page.access_token as string,
-      id: page.id as string,
-      instagramBusinessAccount: page.instagram_business_account?.id
-        ? {
-            id: page.instagram_business_account.id,
-            username: page.instagram_business_account.username ?? null,
-          }
-        : null,
-      name: page.name as string,
-    }));
+    .map(mapMetaPage)
+    .filter((page): page is MetaPageAccount => page !== null);
+}
+
+function mapMetaPage(page: MetaAccountsResponse | MetaPageRaw) {
+  if (
+    !("id" in page) ||
+    !("name" in page) ||
+    !("access_token" in page) ||
+    !page.id ||
+    !page.name ||
+    !page.access_token
+  ) {
+    return null;
+  }
+
+  return {
+    accessToken: page.access_token,
+    id: page.id,
+    instagramBusinessAccount: page.instagram_business_account?.id
+      ? {
+          id: page.instagram_business_account.id,
+          username: page.instagram_business_account.username ?? null,
+        }
+      : null,
+    name: page.name,
+  } satisfies MetaPageAccount;
 }
 
 export async function createMetaOAuthSession({

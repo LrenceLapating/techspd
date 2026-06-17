@@ -3,7 +3,9 @@ import {
   createMetaOAuthSession,
   debugMetaToken,
   exchangeMetaCodeForUserToken,
+  extractGranularPageTargetIds,
   fetchMetaAccountsRaw,
+  fetchMetaPagesByTargetIds,
   getAuthenticatedMetaCompany,
   getRequestedMetaScopes,
   parseMetaState,
@@ -74,7 +76,21 @@ export async function GET(request: Request) {
       fetchMetaAccountsRaw(userAccessToken),
       debugMetaToken(userAccessToken),
     ]);
-    const pages = accountsResult.pages;
+    const granularTargetIds =
+      accountsResult.pages.length === 0
+        ? extractGranularPageTargetIds(tokenDebugInfo)
+        : [];
+    const directPageFetchResults =
+      granularTargetIds.length > 0
+        ? await fetchMetaPagesByTargetIds({
+            accessToken: userAccessToken,
+            targetIds: granularTargetIds,
+          })
+        : { pages: [], results: [] };
+    const pages =
+      accountsResult.pages.length > 0
+        ? accountsResult.pages
+        : directPageFetchResults.pages;
     const selectablePages =
       provider === "instagram"
         ? pages.filter((page) => page.instagramBusinessAccount)
@@ -88,6 +104,9 @@ export async function GET(request: Request) {
           method: "GET",
           url: "https://graph.facebook.com/v19.0/me/accounts",
         },
+        accountsResponse: accountsResult.payload,
+        directPageFetchResults: directPageFetchResults.results,
+        granularTargetIds,
         meta_error:
           accountsResult.payload.error ?? tokenDebugInfo.error ?? null,
         provider,
@@ -106,6 +125,8 @@ export async function GET(request: Request) {
             "Unable to fetch Meta pages.",
           metaError: accountsResult.payload.error ?? null,
           provider,
+          directPageFetchResults: directPageFetchResults.results,
+          granularTargetIds,
           rawAccountsResponse: accountsResult.payload,
           requestedScopes,
           tokenDebug: tokenDebugInfo,
@@ -123,6 +144,8 @@ export async function GET(request: Request) {
               : "No Facebook Pages were returned by Meta.",
           metaError: accountsResult.payload.error ?? null,
           provider,
+          directPageFetchResults: directPageFetchResults.results,
+          granularTargetIds,
           rawAccountsResponse: accountsResult.payload,
           requestedScopes,
           tokenDebug: tokenDebugInfo,
