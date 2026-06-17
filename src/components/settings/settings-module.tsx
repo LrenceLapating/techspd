@@ -13,7 +13,6 @@ import {
   Sparkles,
   UsersRound,
 } from "lucide-react";
-import Link from "next/link";
 import type { ComponentType } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,6 +24,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { MetaConnectButton } from "@/components/settings/meta-connect-button";
 import { Separator } from "@/components/ui/separator";
 import type { ConnectedChannel } from "@/lib/settings/channels";
 import { cn } from "@/lib/utils";
@@ -246,13 +246,8 @@ function ChannelCard({
         ) : null}
       </dl>
 
-      {href ? (
-        <Button asChild className="mt-5 w-full" variant="outline">
-          <Link href={href}>
-            <Plug className="size-4" />
-            {button}
-          </Link>
-        </Button>
+      {isMetaConnectHref(href) ? (
+        <MetaConnectButton href={href} label={button} />
       ) : (
         <Button className="mt-5 w-full" type="button" variant="outline">
           <Plug className="size-4" />
@@ -260,6 +255,15 @@ function ChannelCard({
         </Button>
       )}
     </div>
+  );
+}
+
+function isMetaConnectHref(
+  href: string | null,
+): href is "/api/meta/connect/facebook" | "/api/meta/connect/instagram" {
+  return (
+    href === "/api/meta/connect/facebook" ||
+    href === "/api/meta/connect/instagram"
   );
 }
 
