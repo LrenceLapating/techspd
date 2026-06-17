@@ -136,6 +136,8 @@ const metaStorageSchema = "public";
 const metaOAuthSessionsTable = "meta_oauth_sessions";
 const metaIntegrationsTable = "meta_integrations";
 const subscribedAppsGraphVersion = "v19.0";
+const facebookMessengerSubscribedFields =
+  "messages,messaging_postbacks,message_echoes";
 
 export async function getAuthenticatedMetaCompany(supabase: SupabaseClient) {
   const {
@@ -784,10 +786,13 @@ async function subscribeFacebookPageWebhook({
   const url = new URL(
     `https://graph.facebook.com/${subscribedAppsGraphVersion}/${pageId}/subscribed_apps`,
   );
-
-  url.searchParams.set("access_token", pageAccessToken);
+  const body = new URLSearchParams({
+    access_token: pageAccessToken,
+    subscribed_fields: facebookMessengerSubscribedFields,
+  });
 
   const response = await fetch(url, {
+    body,
     cache: "no-store",
     method: "POST",
   });
