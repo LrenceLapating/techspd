@@ -29,7 +29,7 @@ const checks = [
       "parseMetaState",
       "providerFromValue",
       "exchangeMetaCodeForUserToken",
-      "fetchMetaPages",
+      "fetchMetaAccountsRaw",
     ],
     absent: [
       "getMetaPlaceholderPayload",

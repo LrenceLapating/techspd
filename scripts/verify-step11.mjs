@@ -33,7 +33,7 @@ const checks = [
     file: "src/app/api/meta/callback/route.ts",
     patterns: [
       "exchangeMetaCodeForUserToken",
-      "fetchMetaPages",
+      "fetchMetaAccountsRaw",
       "createMetaOAuthSession",
       "NextResponse.redirect(selectUrl)",
       "instagramBusinessAccount",

@@ -283,6 +283,12 @@ Pages from `/me/accounts?fields=id,name,access_token,instagram_business_account{
 and stores that result in `private.meta_oauth_sessions` for 15 minutes while the
 user selects a Page.
 
+For OAuth debugging, append `debug=1` or `debug=true` to the callback URL. In
+debug mode, the callback returns the raw Meta
+`GET https://graph.facebook.com/v19.0/me/accounts?fields=id,name,access_token,instagram_business_account{id,username}`
+JSON response, requested scopes, token debug information when Meta returns it,
+and any Meta error object instead of redirecting to page selection.
+
 After selection, TechSpd saves a Facebook row in `public.channels`:
 
 - `page_id`

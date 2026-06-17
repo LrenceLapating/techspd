@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 import {
   createMetaOAuthSession,
+  debugMetaToken,
   exchangeMetaCodeForUserToken,
-  fetchMetaPages,
+  fetchMetaAccountsRaw,
   getAuthenticatedMetaCompany,
+  getRequestedMetaScopes,
   parseMetaState,
   providerFromValue,
 } from "@/lib/meta/integration";
@@ -37,6 +39,9 @@ export async function GET(request: Request) {
   const provider =
     parsedState?.provider ?? providerFromValue(url.searchParams.get("provider"));
   const code = url.searchParams.get("code");
+  const debugMode =
+    url.searchParams.get("debug") === "1" ||
+    url.searchParams.get("debug") === "true";
 
   if (!provider) {
     return NextResponse.json(
@@ -64,11 +69,50 @@ export async function GET(request: Request) {
       code,
       origin: url.origin,
     });
-    const pages = await fetchMetaPages(userAccessToken);
+    const requestedScopes = getRequestedMetaScopes(provider);
+    const [accountsResult, tokenDebugInfo] = await Promise.all([
+      fetchMetaAccountsRaw(userAccessToken),
+      debugMetaToken(userAccessToken),
+    ]);
+    const pages = accountsResult.pages;
     const selectablePages =
       provider === "instagram"
         ? pages.filter((page) => page.instagramBusinessAccount)
         : pages;
+
+    if (debugMode) {
+      return NextResponse.json({
+        debug: true,
+        graph_request: {
+          fields: "id,name,access_token,instagram_business_account{id,username}",
+          method: "GET",
+          url: "https://graph.facebook.com/v19.0/me/accounts",
+        },
+        meta_error:
+          accountsResult.payload.error ?? tokenDebugInfo.error ?? null,
+        provider,
+        requested_scopes: requestedScopes,
+        selectable_pages_count: selectablePages.length,
+        token_debug: tokenDebugInfo,
+        raw_accounts_response: accountsResult.payload,
+      });
+    }
+
+    if (!accountsResult.response.ok) {
+      return NextResponse.json(
+        {
+          error:
+            accountsResult.payload.error?.message ??
+            "Unable to fetch Meta pages.",
+          metaError: accountsResult.payload.error ?? null,
+          provider,
+          rawAccountsResponse: accountsResult.payload,
+          requestedScopes,
+          tokenDebug: tokenDebugInfo,
+        },
+        { status: accountsResult.response.status },
+      );
+    }
 
     if (selectablePages.length === 0) {
       return NextResponse.json(
@@ -77,7 +121,11 @@ export async function GET(request: Request) {
             provider === "instagram"
               ? "No Facebook Pages with linked Instagram Professional Accounts were returned by Meta."
               : "No Facebook Pages were returned by Meta.",
+          metaError: accountsResult.payload.error ?? null,
           provider,
+          rawAccountsResponse: accountsResult.payload,
+          requestedScopes,
+          tokenDebug: tokenDebugInfo,
         },
         { status: 404 },
       );
@@ -95,15 +143,21 @@ export async function GET(request: Request) {
 
     return NextResponse.redirect(selectUrl);
   } catch (metaError) {
+    const typedMetaError = metaError as Error & {
+      metaError?: unknown;
+      status?: number;
+    };
+
     return NextResponse.json(
       {
         error:
           metaError instanceof Error
             ? metaError.message
             : "Meta OAuth callback failed.",
+        metaError: typedMetaError.metaError ?? null,
         provider,
       },
-      { status: 500 },
+      { status: typedMetaError.status ?? 500 },
     );
   }
 }

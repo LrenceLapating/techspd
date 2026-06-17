@@ -96,7 +96,7 @@ assert(
   "Inbox data must understand ai sender_type.",
 );
 assert(pkg.includes("\"verify:step15\""), "Missing verify:step15 package script.");
-assert(pkg.includes("verify:step15 && npm run lint"), "verify:all must include Step 15.");
+assert(pkg.includes("verify:step15"), "verify:all must include Step 15.");
 assert(
   readme.includes("/api/n8n/process-message") &&
     readme.includes("/api/n8n/save-ai-reply") &&

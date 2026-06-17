@@ -38,7 +38,9 @@ type ProfileRow = {
 type MetaTokenResponse = {
   access_token?: string;
   error?: {
+    code?: number;
     message?: string;
+    type?: string;
   };
   expires_in?: number;
   token_type?: string;
@@ -55,7 +57,27 @@ type MetaAccountsResponse = {
     name?: string;
   }>;
   error?: {
+    code?: number;
     message?: string;
+    type?: string;
+  };
+};
+
+type MetaDebugTokenResponse = {
+  data?: {
+    app_id?: string;
+    application?: string;
+    data_access_expires_at?: number;
+    expires_at?: number;
+    is_valid?: boolean;
+    scopes?: string[];
+    type?: string;
+    user_id?: string;
+  };
+  error?: {
+    code?: number;
+    message?: string;
+    type?: string;
   };
 };
 
@@ -191,6 +213,18 @@ export function providerFromValue(value: string | null): MetaProvider | null {
   return null;
 }
 
+export function getRequestedMetaScopes(provider: MetaProvider) {
+  const scopes =
+    provider === "facebook"
+      ? process.env.META_FACEBOOK_SCOPES
+      : process.env.META_INSTAGRAM_SCOPES;
+
+  return (scopes ?? "")
+    .split(",")
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+}
+
 export async function exchangeMetaCodeForUserToken({
   code,
   origin,
@@ -214,8 +248,10 @@ export async function exchangeMetaCodeForUserToken({
   const payload = (await response.json()) as MetaTokenResponse;
 
   if (!response.ok || !payload.access_token) {
-    throw new Error(
+    throw metaApiError(
       payload.error?.message ?? "Unable to exchange Meta OAuth code.",
+      payload.error,
+      response.status,
     );
   }
 
@@ -223,8 +259,21 @@ export async function exchangeMetaCodeForUserToken({
 }
 
 export async function fetchMetaPages(accessToken: string) {
-  const graphVersion = process.env.META_GRAPH_VERSION ?? "v20.0";
-  const url = new URL(`https://graph.facebook.com/${graphVersion}/me/accounts`);
+  const { payload, response } = await fetchMetaAccountsRaw(accessToken);
+
+  if (!response.ok) {
+    throw metaApiError(
+      payload.error?.message ?? "Unable to fetch Meta pages.",
+      payload.error,
+      response.status,
+    );
+  }
+
+  return mapMetaPages(payload);
+}
+
+export async function fetchMetaAccountsRaw(accessToken: string) {
+  const url = new URL("https://graph.facebook.com/v19.0/me/accounts");
 
   url.searchParams.set(
     "fields",
@@ -237,10 +286,38 @@ export async function fetchMetaPages(accessToken: string) {
   });
   const payload = (await response.json()) as MetaAccountsResponse;
 
-  if (!response.ok) {
-    throw new Error(payload.error?.message ?? "Unable to fetch Meta pages.");
+  return {
+    pages: response.ok ? mapMetaPages(payload) : [],
+    payload,
+    response,
+  };
+}
+
+export async function debugMetaToken(accessToken: string) {
+  const appId = readMetaEnv("META_APP_ID");
+  const appSecret = readMetaEnv("META_APP_SECRET");
+
+  if (!appId || !appSecret) {
+    return {
+      error: {
+        message: "Missing META_APP_ID or META_APP_SECRET.",
+      },
+    } satisfies MetaDebugTokenResponse;
   }
 
+  const url = new URL("https://graph.facebook.com/v19.0/debug_token");
+
+  url.searchParams.set("input_token", accessToken);
+  url.searchParams.set("access_token", `${appId}|${appSecret}`);
+
+  const response = await fetch(url, {
+    cache: "no-store",
+  });
+
+  return (await response.json()) as MetaDebugTokenResponse;
+}
+
+function mapMetaPages(payload: MetaAccountsResponse) {
   return (payload.data ?? [])
     .filter((page) => page.id && page.name && page.access_token)
     .map((page) => ({
@@ -491,12 +568,25 @@ async function exchangeForLongLivedMetaToken(accessToken: string) {
   const payload = (await response.json()) as MetaTokenResponse;
 
   if (!response.ok || !payload.access_token) {
-    throw new Error(
+    throw metaApiError(
       payload.error?.message ?? "Unable to exchange long-lived Meta token.",
+      payload.error,
+      response.status,
     );
   }
 
   return payload.access_token;
+}
+
+function metaApiError(
+  message: string,
+  metaError: MetaTokenResponse["error"] | MetaAccountsResponse["error"],
+  status: number,
+) {
+  return Object.assign(new Error(message), {
+    metaError: metaError ?? null,
+    status,
+  });
 }
 
 async function deleteMetaOAuthSession(sessionId: string) {
