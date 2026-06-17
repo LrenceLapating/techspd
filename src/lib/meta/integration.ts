@@ -35,6 +35,14 @@ type ProfileRow = {
   company_id: string | null;
 };
 
+type SupabaseStorageDiagnostic = {
+  error: unknown;
+  operation: string;
+  query: string;
+  schema: string;
+  table: string;
+};
+
 type MetaTokenResponse = {
   access_token?: string;
   error?: {
@@ -103,6 +111,10 @@ const pageRelatedScopes = new Set([
   "pages_manage_engagement",
   "pages_read_user_content",
 ]);
+
+const metaStorageSchema = "public";
+const metaOAuthSessionsTable = "meta_oauth_sessions";
+const metaIntegrationsTable = "meta_integrations";
 
 export async function getAuthenticatedMetaCompany(supabase: SupabaseClient) {
   const {
@@ -454,8 +466,7 @@ export async function createMetaOAuthSession({
   const admin = createAdminClient();
   const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
   const { data, error } = await admin
-    .schema("private")
-    .from("meta_oauth_sessions")
+    .from(metaOAuthSessionsTable)
     .insert({
       company_id: companyId,
       expires_at: expiresAt,
@@ -467,7 +478,13 @@ export async function createMetaOAuthSession({
     .single();
 
   if (error) {
-    throw new Error(error.message);
+    throw metaStorageError({
+      error,
+      operation: "insert",
+      query: `${metaStorageSchema}.${metaOAuthSessionsTable}.insert(...).select("id").single()`,
+      schema: metaStorageSchema,
+      table: metaOAuthSessionsTable,
+    });
   }
 
   return data.id as string;
@@ -482,13 +499,22 @@ export async function getMetaOAuthSession({
 }) {
   const admin = createAdminClient();
   const { data, error } = await admin
-    .schema("private")
-    .from("meta_oauth_sessions")
+    .from(metaOAuthSessionsTable)
     .select("id, company_id, provider, pages, user_access_token")
     .eq("id", sessionId)
     .eq("company_id", companyId)
     .gt("expires_at", new Date().toISOString())
     .single();
+
+  if (error) {
+    logMetaStorageError({
+      error,
+      operation: "select",
+      query: `${metaStorageSchema}.${metaOAuthSessionsTable}.select("id, company_id, provider, pages, user_access_token").eq("id", sessionId).eq("company_id", companyId).gt("expires_at", now).single()`,
+      schema: metaStorageSchema,
+      table: metaOAuthSessionsTable,
+    });
+  }
 
   if (error || !data) {
     return null;
@@ -552,8 +578,7 @@ export async function saveMetaIntegration({
   const savedChannels: Array<"facebook" | "instagram"> = [];
 
   const { data: integration, error: integrationError } = await admin
-    .schema("private")
-    .from("meta_integrations")
+    .from(metaIntegrationsTable)
     .upsert(
       {
         access_token: input.accessToken,
@@ -573,7 +598,13 @@ export async function saveMetaIntegration({
     .single();
 
   if (integrationError) {
-    throw new Error(integrationError.message);
+    throw metaStorageError({
+      error: integrationError,
+      operation: "upsert",
+      query: `${metaStorageSchema}.${metaIntegrationsTable}.upsert(..., { onConflict: "company_id,provider" }).select("id, provider").single()`,
+      schema: metaStorageSchema,
+      table: metaIntegrationsTable,
+    });
   }
 
   const { error: facebookChannelError } = await admin.from("channels").upsert(
@@ -698,11 +729,78 @@ function metaApiError(
 
 async function deleteMetaOAuthSession(sessionId: string) {
   const admin = createAdminClient();
-  await admin
-    .schema("private")
-    .from("meta_oauth_sessions")
+  const { error } = await admin
+    .from(metaOAuthSessionsTable)
     .delete()
     .eq("id", sessionId);
+
+  if (error) {
+    logMetaStorageError({
+      error,
+      operation: "delete",
+      query: `${metaStorageSchema}.${metaOAuthSessionsTable}.delete().eq("id", sessionId)`,
+      schema: metaStorageSchema,
+      table: metaOAuthSessionsTable,
+    });
+  }
+}
+
+export async function getMetaStorageDebugDiagnostics() {
+  const admin = createAdminClient();
+  const activeQuery = await admin
+    .from(metaOAuthSessionsTable)
+    .select("id")
+    .limit(1);
+  const legacyPrivateQuery = await admin
+    .schema("private")
+    .from(metaOAuthSessionsTable)
+    .select("id")
+    .limit(1);
+
+  return {
+    active: {
+      error: activeQuery.error,
+      query: `${metaStorageSchema}.${metaOAuthSessionsTable}.select("id").limit(1)`,
+      schema: metaStorageSchema,
+      table: metaOAuthSessionsTable,
+    },
+    legacyPrivate: {
+      error: legacyPrivateQuery.error,
+      query: `private.${metaOAuthSessionsTable}.select("id").limit(1)`,
+      schema: "private",
+      table: metaOAuthSessionsTable,
+    },
+  };
+}
+
+function metaStorageError(diagnostic: SupabaseStorageDiagnostic) {
+  logMetaStorageError(diagnostic);
+
+  return Object.assign(new Error(storageErrorMessage(diagnostic)), {
+    storageDiagnostic: diagnostic,
+  });
+}
+
+function logMetaStorageError(diagnostic: SupabaseStorageDiagnostic) {
+  console.error("[meta-storage] Supabase query failed.", {
+    error: diagnostic.error,
+    operation: diagnostic.operation,
+    query: diagnostic.query,
+    schema: diagnostic.schema,
+    table: diagnostic.table,
+  });
+}
+
+function storageErrorMessage(diagnostic: SupabaseStorageDiagnostic) {
+  const errorMessage =
+    diagnostic.error &&
+    typeof diagnostic.error === "object" &&
+    "message" in diagnostic.error &&
+    typeof diagnostic.error.message === "string"
+      ? diagnostic.error.message
+      : "Meta OAuth storage query failed.";
+
+  return `${errorMessage} (${diagnostic.schema}.${diagnostic.table})`;
 }
 
 function requiredMetaEnv(key: "META_APP_ID" | "META_APP_SECRET") {

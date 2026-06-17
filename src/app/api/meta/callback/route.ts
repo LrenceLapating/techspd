@@ -8,6 +8,7 @@ import {
   fetchMetaPagesByTargetIds,
   getAuthenticatedMetaCompany,
   getRequestedMetaScopes,
+  getMetaStorageDebugDiagnostics,
   parseMetaState,
   providerFromValue,
 } from "@/lib/meta/integration";
@@ -97,6 +98,8 @@ export async function GET(request: Request) {
         : pages;
 
     if (debugMode) {
+      const storageDiagnostics = await getMetaStorageDebugDiagnostics();
+
       return NextResponse.json({
         debug: true,
         graph_request: {
@@ -112,6 +115,7 @@ export async function GET(request: Request) {
         provider,
         requested_scopes: requestedScopes,
         selectable_pages_count: selectablePages.length,
+        storageDiagnostics,
         token_debug: tokenDebugInfo,
         raw_accounts_response: accountsResult.payload,
       });
@@ -129,6 +133,7 @@ export async function GET(request: Request) {
           granularTargetIds,
           rawAccountsResponse: accountsResult.payload,
           requestedScopes,
+          storageDiagnostics: await getMetaStorageDebugDiagnostics(),
           tokenDebug: tokenDebugInfo,
         },
         { status: accountsResult.response.status },
@@ -148,6 +153,7 @@ export async function GET(request: Request) {
           granularTargetIds,
           rawAccountsResponse: accountsResult.payload,
           requestedScopes,
+          storageDiagnostics: await getMetaStorageDebugDiagnostics(),
           tokenDebug: tokenDebugInfo,
         },
         { status: 404 },
@@ -169,6 +175,7 @@ export async function GET(request: Request) {
     const typedMetaError = metaError as Error & {
       metaError?: unknown;
       status?: number;
+      storageDiagnostic?: unknown;
     };
 
     return NextResponse.json(
@@ -179,6 +186,7 @@ export async function GET(request: Request) {
             : "Meta OAuth callback failed.",
         metaError: typedMetaError.metaError ?? null,
         provider,
+        storageDiagnostic: typedMetaError.storageDiagnostic ?? null,
       },
       { status: typedMetaError.status ?? 500 },
     );

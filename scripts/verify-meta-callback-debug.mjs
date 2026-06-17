@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 const files = {
   callback: "src/app/api/meta/callback/route.ts",
   integration: "src/lib/meta/integration.ts",
+  migration: "supabase/migrations/20260617164340_move_meta_oauth_storage_to_public_api_schema.sql",
 };
 
 const failures = [];
@@ -20,6 +21,7 @@ for (const [name, path] of Object.entries(files)) {
 
 const callback = read(files.callback);
 const integration = read(files.integration);
+const migration = read(files.migration);
 
 for (const pattern of [
   "fetchMetaAccountsRaw",
@@ -33,6 +35,8 @@ for (const pattern of [
   "directPageFetchResults",
   "raw_accounts_response: accountsResult.payload",
   "requested_scopes: requestedScopes",
+  "storageDiagnostics",
+  "storageDiagnostic",
   "token_debug: tokenDebugInfo",
   "meta_error:",
   "rawAccountsResponse: accountsResult.payload",
@@ -64,8 +68,29 @@ for (const pattern of [
   "META_FACEBOOK_SCOPES",
   "META_INSTAGRAM_SCOPES",
   "metaApiError",
+  "metaStorageSchema = \"public\"",
+  "metaOAuthSessionsTable = \"meta_oauth_sessions\"",
+  "metaIntegrationsTable = \"meta_integrations\"",
+  "getMetaStorageDebugDiagnostics",
+  "[meta-storage] Supabase query failed.",
 ]) {
   assert(integration.includes(pattern), `Meta integration debug helper missing: ${pattern}`);
+}
+
+for (const pattern of [
+  "create table if not exists public.meta_oauth_sessions",
+  "create table if not exists public.meta_integrations",
+  "from private.meta_oauth_sessions",
+  "from private.meta_integrations",
+  "alter table public.meta_oauth_sessions enable row level security",
+  "alter table public.meta_integrations enable row level security",
+  "revoke all on public.meta_oauth_sessions from anon, authenticated",
+  "revoke all on public.meta_integrations from anon, authenticated",
+]) {
+  assert(
+    migration.includes(pattern),
+    `Meta storage compatibility migration missing: ${pattern}`,
+  );
 }
 
 if (failures.length > 0) {

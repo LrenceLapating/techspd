@@ -135,8 +135,9 @@ supabase/migrations/20260617005000_create_meta_integration_placeholders.sql
 ```
 
 This creates `private.meta_integrations` for future Facebook and Instagram OAuth
-tokens. The app writes sensitive Meta values there with the server service role
-and mirrors only non-sensitive channel status into `public.channels`.
+tokens. Later compatibility migration `20260617164340` mirrors this storage into
+server-only public API tables so the Supabase service-role REST client can reach
+the data without exposing normal client access.
 
 After Step 11, also run:
 
@@ -145,8 +146,9 @@ supabase/migrations/20260617006000_create_meta_oauth_sessions.sql
 ```
 
 This creates `private.meta_oauth_sessions` for short-lived, server-side OAuth
-page selection sessions. The browser only receives page IDs and names; user and
-page access tokens stay in private server-side storage.
+page selection sessions. Later compatibility migration `20260617164340` mirrors
+this storage into server-only public API tables so the Supabase service-role REST
+client can reach the data without exposing normal client access.
 
 After Step 12, also run:
 
@@ -186,6 +188,18 @@ supabase/migrations/20260617110107_add_ai_message_sender_type.sql
 
 This adds `ai` to `public.message_sender_type` so n8n-generated AI replies can
 be stored separately from customer, owner, and system messages.
+
+After the Meta OAuth storage compatibility fix, also run:
+
+```bash
+supabase/migrations/20260617164340_move_meta_oauth_storage_to_public_api_schema.sql
+```
+
+This creates `public.meta_oauth_sessions` and `public.meta_integrations`, copies
+existing rows from the original `private` tables, enables RLS, and revokes
+normal `anon`/`authenticated` table access. The server uses the service role key
+to access these tables through Supabase REST. This avoids PostgREST errors such
+as `Invalid schema: private`.
 
 The first migration creates:
 
@@ -280,8 +294,9 @@ missing, the routes return a clear JSON configuration error.
 The callback exchanges the OAuth `code` at Meta's `/oauth/access_token`
 endpoint, exchanges the short-lived user token for a long-lived token, fetches
 Pages from `/me/accounts?fields=id,name,access_token,instagram_business_account{id,username}`,
-and stores that result in `private.meta_oauth_sessions` for 15 minutes while the
-user selects a Page.
+and stores that result in `public.meta_oauth_sessions` for 15 minutes while the
+user selects a Page. These tables are server-only through RLS plus revoked client
+grants; the service role key is required.
 
 For OAuth debugging, append `debug=1` or `debug=true` to the callback URL. In
 debug mode, the callback returns the raw Meta
