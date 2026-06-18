@@ -47,6 +47,7 @@ export default async function Home() {
     <DashboardShell
       activeSection="Inbox"
       companyName={context.companyName}
+      contentMode="workspace"
       counts={context.counts}
       email={context.email}
     >

@@ -104,7 +104,8 @@ for (const requirement of [
   assert(inbox.includes(requirement), `AI toggle requirement missing: ${requirement}`);
 }
 assert(
-  inbox.includes("xl:grid-cols-[320px_minmax(0,1fr)_340px]"),
+  inbox.includes("h-full min-h-0 grid-flow-col") &&
+    inbox.includes("xl:grid-cols-[300px_minmax(0,1fr)_320px]"),
   "Inbox must use a responsive 3-panel desktop layout.",
 );
 assert(

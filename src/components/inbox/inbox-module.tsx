@@ -45,7 +45,7 @@ const emptySnapshot: InboxSnapshot = {
   selectedConversationId: null,
 };
 
-type RealtimeStatus = "connecting" | "live" | "offline";
+type RealtimeStatus = "connecting" | "connected" | "error";
 
 type RealtimeMessageRow = {
   body: string;
@@ -71,10 +71,17 @@ export function InboxModule({
     useState<RealtimeStatus>("connecting");
   const [sendError, setSendError] = useState<string | null>(null);
   const conversationsRef = useRef(snapshot.conversations);
+  const selectedConversationIdRef = useRef(selectedConversationId);
+  const snapshotRequestRef = useRef(0);
+  const snapshotAppliedRef = useRef(0);
 
   useEffect(() => {
     conversationsRef.current = snapshot.conversations;
   }, [snapshot.conversations]);
+
+  useEffect(() => {
+    selectedConversationIdRef.current = selectedConversationId;
+  }, [selectedConversationId]);
 
   const selectedConversation = useMemo(
     () =>
@@ -88,41 +95,54 @@ export function InboxModule({
 
   useEffect(() => {
     if (!companyId) {
-      setRealtimeStatus("offline");
+      setRealtimeStatus("error");
       return;
     }
 
     const supabase = createClient();
+    const channelName = `company-${companyId}-inbox`;
     let channel: RealtimeChannel | null = supabase
-      .channel(`company-${companyId}-messages`)
+      .channel(channelName)
       .on(
         "postgres_changes",
         {
           event: "INSERT",
-          filter: `company_id=eq.${companyId}`,
           schema: "public",
           table: "messages",
         },
-        async (payload) => {
+        (payload) => {
           const message = payload.new as RealtimeMessageRow;
 
-          console.info("[TechSpd Realtime] message insert received", {
+          console.info("[TechSpd Realtime] messages INSERT", {
             companyId: message.company_id,
             conversationId: message.conversation_id,
             messageId: message.id,
             senderType: message.sender_type,
           });
-          await refreshInboxSnapshot(selectedConversationId);
+          void refreshInboxSnapshot("messages INSERT");
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "conversations",
+        },
+        (payload) => {
+          console.info("[TechSpd Realtime] conversations UPDATE", {
+            conversationId: (payload.new as { id?: string }).id,
+          });
+          void refreshInboxSnapshot("conversations UPDATE");
         },
       )
       .subscribe((status, error) => {
         if (status === "SUBSCRIBED") {
-          console.info("[TechSpd Realtime] realtime subscribed", {
-            channel: `company-${companyId}-messages`,
+          console.info("[TechSpd Realtime] SUBSCRIBED", {
+            channel: channelName,
             companyId,
-            messageFilter: `company_id=eq.${companyId}`,
           });
-          setRealtimeStatus("live");
+          setRealtimeStatus("connected");
           return;
         }
 
@@ -131,12 +151,12 @@ export function InboxModule({
           status === "TIMED_OUT" ||
           status === "CLOSED"
         ) {
-          console.error("[TechSpd Realtime] realtime error", {
+          console.error(`[TechSpd Realtime] ${status}`, {
             companyId,
             error,
             status,
           });
-          setRealtimeStatus("offline");
+          setRealtimeStatus("error");
           return;
         }
 
@@ -149,10 +169,13 @@ export function InboxModule({
         channel = null;
       }
     };
-  }, [companyId, selectedConversationId]);
+  }, [companyId]);
 
-  async function refreshInboxSnapshot(conversationId: string | null) {
+  async function refreshInboxSnapshot(source: string) {
+    const requestId = snapshotRequestRef.current + 1;
+    snapshotRequestRef.current = requestId;
     const searchParams = new URLSearchParams();
+    const conversationId = selectedConversationIdRef.current;
 
     if (conversationId) {
       searchParams.set("conversationId", conversationId);
@@ -175,11 +198,19 @@ export function InboxModule({
       }
 
       const refreshed = (await response.json()) as InboxSnapshot;
+
+      if (requestId < snapshotAppliedRef.current) {
+        return;
+      }
+
+      snapshotAppliedRef.current = requestId;
       setSnapshot(refreshed);
       setSelectedConversationId(refreshed.selectedConversationId);
+      selectedConversationIdRef.current = refreshed.selectedConversationId;
 
       console.info("[TechSpd Realtime] snapshot refreshed", {
         conversationCount: refreshed.conversations.length,
+        source,
         selectedConversationId: refreshed.selectedConversationId,
       });
     } catch (error) {
@@ -190,6 +221,7 @@ export function InboxModule({
   }
 
   function openConversation(conversationId: string) {
+    selectedConversationIdRef.current = conversationId;
     setSelectedConversationId(conversationId);
     setSnapshot((current) => ({
       ...current,
@@ -307,7 +339,7 @@ export function InboxModule({
   }
 
   return (
-    <section className="grid min-h-[calc(100vh-172px)] gap-4 xl:grid-cols-[320px_minmax(0,1fr)_340px]">
+    <section className="grid h-full min-h-0 grid-flow-col auto-cols-[min(92vw,420px)] gap-3 overflow-x-auto overscroll-x-contain pb-1 xl:grid-flow-row xl:auto-cols-auto xl:grid-cols-[300px_minmax(0,1fr)_320px] xl:overflow-hidden xl:pb-0">
       <ConversationList
         conversations={snapshot.conversations}
         onSelect={openConversation}
@@ -346,9 +378,9 @@ function ConversationList({
   selectedConversationId: string | null;
 }) {
   return (
-    <Card aria-label="Conversation list" className="overflow-hidden shadow-sm">
-      <CardContent className="flex h-full flex-col p-0">
-        <div className="border-b p-4">
+    <Card aria-label="Conversation list" className="h-full min-h-0 overflow-hidden shadow-sm">
+      <CardContent className="flex h-full min-h-0 flex-col p-0">
+        <div className="shrink-0 border-b p-4">
           <div className="flex items-center justify-between gap-3">
             <div>
               <h3 className="font-semibold tracking-tight">Unified inbox</h3>
@@ -393,7 +425,7 @@ function ConversationList({
           </div>
         </div>
 
-        <div className="flex-1 space-y-2 overflow-y-auto p-3">
+        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
           {conversations.length > 0 ? (
             conversations.map((conversation) => (
               <ConversationCard
@@ -483,19 +515,48 @@ function ChatPanel({
 }) {
   const [draft, setDraft] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const [showLatestMessage, setShowLatestMessage] = useState(false);
+  const messagesViewportRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const isNearBottomRef = useRef(true);
+  const previousConversationIdRef = useRef<string | null>(null);
+  const previousLastMessageIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({
-      behavior: "smooth",
-      block: "end",
-    });
-  }, [conversation?.id, messages.length]);
+    const conversationChanged =
+      previousConversationIdRef.current !== (conversation?.id ?? null);
+    const lastMessageId = messages.at(-1)?.id ?? null;
+    const messageChanged = previousLastMessageIdRef.current !== lastMessageId;
+
+    previousConversationIdRef.current = conversation?.id ?? null;
+    previousLastMessageIdRef.current = lastMessageId;
+
+    if (conversationChanged) {
+      isNearBottomRef.current = true;
+      setShowLatestMessage(false);
+      messagesEndRef.current?.scrollIntoView({ block: "end" });
+      return;
+    }
+
+    if (!messageChanged) {
+      return;
+    }
+
+    if (isNearBottomRef.current) {
+      setShowLatestMessage(false);
+      messagesEndRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "end",
+      });
+    } else {
+      setShowLatestMessage(true);
+    }
+  }, [conversation?.id, messages]);
 
   if (!conversation) {
     return (
-      <Card className="overflow-hidden shadow-sm">
-        <CardContent className="flex h-full min-h-[560px] items-center justify-center p-6">
+      <Card className="h-full min-h-0 overflow-hidden shadow-sm">
+        <CardContent className="flex h-full items-center justify-center p-6">
           <div className="max-w-sm text-center">
             <div className="mx-auto flex size-12 items-center justify-center rounded-xl bg-secondary text-muted-foreground">
               <MessageSquareText className="size-5" />
@@ -566,9 +627,9 @@ function ChatPanel({
   }
 
   return (
-    <Card className="overflow-hidden shadow-sm">
-      <CardContent className="flex h-full flex-col p-0">
-        <div className="border-b p-4">
+    <Card className="h-full min-h-0 overflow-hidden shadow-sm">
+      <CardContent className="flex h-full min-h-0 flex-col p-0">
+        <div className="z-10 shrink-0 border-b bg-card p-4">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-center gap-3">
               <CustomerAvatar conversation={conversation} size="size-11" />
@@ -607,20 +668,55 @@ function ChatPanel({
           ) : null}
         </div>
 
-        <div className="flex-1 space-y-4 overflow-y-auto bg-secondary/30 p-4">
-          {messages.length > 0 ? (
-            messages.map((message) => (
-              <ChatBubble message={message} key={message.id} />
-            ))
-          ) : (
-            <div className="rounded-xl border border-dashed bg-card p-4 text-sm text-muted-foreground">
-              No messages yet for this customer.
-            </div>
-          )}
-          <div ref={messagesEndRef} />
+        <div className="relative min-h-0 flex-1">
+          <div
+            className="h-full space-y-2 overflow-y-auto overscroll-contain bg-secondary/30 p-4"
+            onScroll={(event) => {
+              const viewport = event.currentTarget;
+              const distanceFromBottom =
+                viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+              const isNearBottom = distanceFromBottom < 120;
+
+              isNearBottomRef.current = isNearBottom;
+              if (isNearBottom) {
+                setShowLatestMessage(false);
+              }
+            }}
+            ref={messagesViewportRef}
+          >
+            {messages.length > 0 ? (
+              messages.map((message) => (
+                <ChatBubble message={message} key={message.id} />
+              ))
+            ) : (
+              <div className="rounded-lg border border-dashed bg-card p-4 text-sm text-muted-foreground">
+                No messages yet for this customer.
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {showLatestMessage ? (
+            <Button
+              className="absolute bottom-3 left-1/2 -translate-x-1/2 shadow-md"
+              onClick={() => {
+                messagesEndRef.current?.scrollIntoView({
+                  behavior: "smooth",
+                  block: "end",
+                });
+                isNearBottomRef.current = true;
+                setShowLatestMessage(false);
+              }}
+              size="sm"
+              type="button"
+              variant="secondary"
+            >
+              Latest message
+            </Button>
+          ) : null}
         </div>
 
-        <div className="border-t bg-card p-4">
+        <div className="sticky bottom-0 z-10 shrink-0 border-t bg-card p-4">
           <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span className="inline-flex items-center gap-1">
               <UserRound className="size-3.5" />
@@ -696,7 +792,7 @@ function ChatBubble({ message }: { message: InboxMessage }) {
     <div className={cn("flex", isOwner ? "justify-end" : "justify-start")}>
       <div
         className={cn(
-          "max-w-[82%] rounded-2xl border px-4 py-3 shadow-sm",
+          "max-w-[78%] rounded-2xl border px-3 py-2 shadow-sm",
           isOwner && "bg-primary text-primary-foreground",
           isAi && "bg-accent text-accent-foreground",
           message.sender === "customer" && "bg-card text-card-foreground",
@@ -717,7 +813,7 @@ function ChatBubble({ message }: { message: InboxMessage }) {
           </span>
           <span>{message.time}</span>
         </div>
-        <p className="text-sm leading-6">{message.body}</p>
+        <p className="text-sm leading-5">{message.body}</p>
         {message.sender !== "customer" && message.status ? (
           <div
             className={cn(
@@ -757,8 +853,8 @@ function CustomerPanel({
 
   if (!conversation) {
     return (
-      <Card className="overflow-hidden shadow-sm">
-        <CardContent className="flex h-full min-h-[560px] items-center justify-center p-6 text-center text-sm text-muted-foreground">
+      <Card className="h-full min-h-0 overflow-hidden shadow-sm">
+        <CardContent className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
           No customer record yet.
         </CardContent>
       </Card>
@@ -766,8 +862,8 @@ function CustomerPanel({
   }
 
   return (
-    <Card className="overflow-hidden shadow-sm">
-      <CardContent className="h-full space-y-5 p-4">
+    <Card className="h-full min-h-0 overflow-hidden shadow-sm">
+      <CardContent className="h-full space-y-5 overflow-y-auto overscroll-contain p-4">
         <div>
           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
             Customer record
@@ -1071,20 +1167,25 @@ function moveConversationToTop(
 }
 
 function RealtimeBadge({ status }: { status: RealtimeStatus }) {
-  const isLive = status === "live";
-  const Icon = isLive ? Wifi : WifiOff;
+  if (process.env.NODE_ENV === "production") {
+    return null;
+  }
+
+  const isConnected = status === "connected";
+  const Icon = isConnected ? Wifi : WifiOff;
 
   return (
     <Badge
       className={cn(
         "gap-1.5",
-        isLive && "bg-[#ecfdf5] text-[#047857]",
+        isConnected && "bg-[#ecfdf5] text-[#047857]",
         status === "connecting" && "bg-[#fffbeb] text-[#b45309]",
+        status === "error" && "bg-[#fef2f2] text-[#b91c1c]",
       )}
       variant="secondary"
     >
       <Icon className="size-3.5" />
-      {isLive ? "Live" : status === "connecting" ? "Connecting" : "Offline"}
+      Realtime: {isConnected ? "Connected" : status === "connecting" ? "Connecting" : "Error"}
     </Badge>
   );
 }

@@ -102,6 +102,7 @@ type DashboardShellProps = {
   activeSection?: keyof typeof sectionCopy;
   children?: ReactNode;
   companyName?: string;
+  contentMode?: "default" | "workspace";
   counts?: DashboardCounts;
   email?: string;
 };
@@ -110,6 +111,7 @@ export function DashboardShell({
   activeSection = "Inbox",
   children,
   companyName,
+  contentMode = "default",
   counts = {
     conversations: 0,
     customers: 0,
@@ -119,6 +121,7 @@ export function DashboardShell({
   email,
 }: DashboardShellProps) {
   const displayCompany = companyName ?? "Your company";
+  const isWorkspace = contentMode === "workspace";
   const copy = sectionCopy[activeSection];
   const initials = displayCompany
     .split(" ")
@@ -128,9 +131,19 @@ export function DashboardShell({
     .join("");
 
   return (
-    <main className="min-h-screen bg-background text-foreground">
-      <div className="grid min-h-screen lg:grid-cols-[272px_1fr]">
-        <aside className="hidden border-r bg-card px-5 py-6 lg:flex lg:flex-col">
+    <main
+      className={cn(
+        "min-h-screen bg-background text-foreground",
+        isWorkspace && "h-dvh overflow-hidden",
+      )}
+    >
+      <div
+        className={cn(
+          "grid min-h-screen lg:grid-cols-[272px_1fr]",
+          isWorkspace && "h-full min-h-0",
+        )}
+      >
+        <aside className="hidden overflow-y-auto border-r bg-card px-5 py-6 lg:flex lg:flex-col">
           <div className="flex items-center gap-3">
             <div className="flex size-10 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm">
               <Sparkles className="size-5" />
@@ -172,8 +185,8 @@ export function DashboardShell({
           </div>
         </aside>
 
-        <section className="dashboard-grid flex min-w-0 flex-col">
-          <header className="sticky top-0 z-10 border-b bg-background/88 px-4 py-4 backdrop-blur sm:px-6 lg:px-8">
+        <section className="dashboard-grid flex min-h-0 min-w-0 flex-col">
+          <header className="sticky top-0 z-10 shrink-0 border-b bg-background/88 px-4 py-4 backdrop-blur sm:px-6 lg:px-8">
             <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
               <div className="flex items-center justify-between gap-4">
                 <div className="flex items-center gap-3 lg:hidden">
@@ -236,8 +249,18 @@ export function DashboardShell({
             </div>
           </header>
 
-          <div className="flex-1 px-4 py-6 sm:px-6 lg:px-8">
-            <div className="mx-auto flex max-w-7xl flex-col gap-6">
+          <div
+            className={cn(
+              "flex-1 px-4 py-6 sm:px-6 lg:px-8",
+              isWorkspace && "min-h-0 overflow-hidden",
+            )}
+          >
+            <div
+              className={cn(
+                "mx-auto flex max-w-7xl flex-col gap-6",
+                isWorkspace && "h-full min-h-0",
+              )}
+            >
               <nav className="flex gap-2 overflow-x-auto pb-1 lg:hidden">
                 {navItems.map((item) => (
                   <Link
