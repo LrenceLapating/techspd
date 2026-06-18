@@ -69,6 +69,10 @@ for (const required of [
   "Converted",
   "Lost",
   "AI Auto Reply",
+  "AI Enabled",
+  "Human Mode",
+  "AI replies enabled",
+  "Human mode active",
   "Conversion",
 ]) {
   assert(inbox.includes(required), `Missing customer panel requirement: ${required}`);
@@ -87,6 +91,18 @@ assert(
   inbox.includes("ai_enabled"),
   "Missing ai_enabled customer control.",
 );
+for (const requirement of [
+  'role="switch"',
+  "aria-checked={conversation.aiEnabled}",
+  'bg-[#16a34a]',
+  'bg-[#9ca3af]',
+  ".update({ ai_enabled: aiEnabled })",
+  '.eq("company_id", companyId)',
+  '.eq("id", customerId)',
+  "applyValue(previousAiEnabled)",
+]) {
+  assert(inbox.includes(requirement), `AI toggle requirement missing: ${requirement}`);
+}
 assert(
   inbox.includes("xl:grid-cols-[320px_minmax(0,1fr)_340px]"),
   "Inbox must use a responsive 3-panel desktop layout.",

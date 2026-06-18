@@ -27,6 +27,7 @@ export type MetaWebhookParseResult = {
 };
 
 type ChannelRow = {
+  access_token: string | null;
   channel_id: string | null;
   channel_name: string | null;
   company_id: string;
@@ -37,7 +38,25 @@ type ChannelRow = {
 
 type CustomerRow = {
   ai_enabled: boolean;
+  avatar_url: string | null;
   id: string;
+  name: string;
+};
+
+type FacebookCustomerProfile = {
+  avatarUrl: string | null;
+  name: string | null;
+};
+
+type MetaCustomerProfileResponse = {
+  error?: {
+    code?: number;
+    message?: string;
+    type?: string;
+  };
+  id?: string;
+  name?: string;
+  profile_pic?: string;
 };
 
 type ConversationRow = {
@@ -102,11 +121,13 @@ export async function ingestMetaWebhookMessage(
   const channel = await findConnectedChannel(event);
   const body = event.text ?? "[Attachment]";
   const customerExternalId = `${event.platform}:${event.platformUserId}`;
+  const profile = await fetchFacebookCustomerProfile({ channel, event });
 
   const customer = await findOrCreateCustomer({
     companyId: channel.company_id,
     event,
     externalId: customerExternalId,
+    profile,
   });
   const conversation = await findOrCreateConversation({
     body,
@@ -177,7 +198,9 @@ async function findConnectedChannel(event: MetaWebhookMessageEvent) {
 
   const { data: byChannelId, error: channelIdError } = await supabase
     .from("channels")
-    .select("id, company_id, platform, channel_id, channel_name, external_id")
+    .select(
+      "id, company_id, platform, channel_id, channel_name, external_id, access_token",
+    )
     .eq("platform", event.platform)
     .eq("channel_id", event.channelId)
     .eq("is_connected", true)
@@ -193,7 +216,9 @@ async function findConnectedChannel(event: MetaWebhookMessageEvent) {
 
   const { data: byExternalId, error: externalIdError } = await supabase
     .from("channels")
-    .select("id, company_id, platform, channel_id, channel_name, external_id")
+    .select(
+      "id, company_id, platform, channel_id, channel_name, external_id, access_token",
+    )
     .eq("platform", event.platform)
     .eq("external_id", event.channelId)
     .eq("is_connected", true)
@@ -216,16 +241,18 @@ async function findOrCreateCustomer({
   companyId,
   event,
   externalId,
+  profile,
 }: {
   companyId: string;
   event: MetaWebhookMessageEvent;
   externalId: string;
+  profile: FacebookCustomerProfile | null;
 }) {
   const supabase = createAdminClient();
 
   const { data: existing, error: findError } = await supabase
     .from("customers")
-    .select("id, ai_enabled")
+    .select("id, ai_enabled, name, avatar_url")
     .eq("company_id", companyId)
     .eq("external_id", externalId)
     .maybeSingle();
@@ -235,12 +262,28 @@ async function findOrCreateCustomer({
   }
 
   if (existing) {
+    if (profile) {
+      const { error: updateError } = await supabase
+        .from("customers")
+        .update({
+          avatar_url: profile.avatarUrl ?? existing.avatar_url,
+          name: profile.name ?? existing.name,
+        })
+        .eq("id", existing.id)
+        .eq("company_id", companyId);
+
+      if (updateError) {
+        throw new Error(updateError.message);
+      }
+    }
+
     return existing as CustomerRow;
   }
 
   const { data, error } = await supabase
     .from("customers")
     .insert({
+      avatar_url: profile?.avatarUrl ?? null,
       company_id: companyId,
       external_id: externalId,
       last_activity_at: event.timestamp,
@@ -248,7 +291,9 @@ async function findOrCreateCustomer({
         platform_user_id: event.platformUserId,
         source: "meta_webhook",
       },
-      name: fallbackCustomerName(event.platform, event.platformUserId),
+      name:
+        profile?.name ??
+        fallbackCustomerName(event.platform, event.platformUserId),
       platform: event.platform,
     })
     .select("id, ai_enabled")
@@ -259,6 +304,49 @@ async function findOrCreateCustomer({
   }
 
   return data as CustomerRow;
+}
+
+async function fetchFacebookCustomerProfile({
+  channel,
+  event,
+}: {
+  channel: ChannelRow;
+  event: MetaWebhookMessageEvent;
+}): Promise<FacebookCustomerProfile | null> {
+  if (event.platform !== "facebook" || !channel.access_token) {
+    return null;
+  }
+
+  const graphVersion = process.env.META_GRAPH_VERSION ?? "v20.0";
+  const url = new URL(
+    `https://graph.facebook.com/${graphVersion}/${encodeURIComponent(event.platformUserId)}`,
+  );
+  url.searchParams.set("fields", "name,profile_pic");
+  url.searchParams.set("access_token", channel.access_token);
+
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    const payload = (await response.json()) as MetaCustomerProfileResponse;
+
+    if (!response.ok || payload.error) {
+      console.warn("[meta-webhook] Facebook customer profile lookup failed.", {
+        error: payload.error ?? { status: response.status },
+        platform_user_id: event.platformUserId,
+      });
+      return null;
+    }
+
+    return {
+      avatarUrl: optionalString(payload.profile_pic),
+      name: optionalString(payload.name),
+    };
+  } catch (error) {
+    console.warn("[meta-webhook] Facebook customer profile lookup failed.", {
+      error,
+      platform_user_id: event.platformUserId,
+    });
+    return null;
+  }
 }
 
 async function findOrCreateConversation({
@@ -425,6 +513,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function fallbackCustomerName(platform: MetaWebhookPlatform, platformUserId: string) {
+  if (platform === "facebook") {
+    return `Facebook User ${platformUserId}`;
+  }
+
   const suffix = platformUserId.slice(-6) || "unknown";
 
   return `${formatPlatform(platform)} User ${suffix}`;

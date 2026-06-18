@@ -3,6 +3,9 @@ import { existsSync, readFileSync } from "node:fs";
 const files = {
   envExample: ".env.example",
   migration: "supabase/migrations/20260617102853_add_conversation_last_message.sql",
+  identityMigration: "supabase/migrations/20260618115839_add_customer_avatar_url.sql",
+  inboxData: "src/lib/inbox/data.ts",
+  inboxModule: "src/components/inbox/inbox-module.tsx",
   package: "package.json",
   route: "src/app/api/webhooks/meta/route.ts",
   webhook: "src/lib/meta/webhook.ts",
@@ -23,6 +26,9 @@ for (const [name, path] of Object.entries(files)) {
 
 const envExample = read(files.envExample);
 const migration = read(files.migration);
+const identityMigration = read(files.identityMigration);
+const inboxData = read(files.inboxData);
+const inboxModule = read(files.inboxModule);
 const pkg = read(files.package);
 const route = read(files.route);
 const webhook = read(files.webhook);
@@ -81,6 +87,13 @@ for (const operation of [
   "page_id: event.pageId",
   "instagram_id: event.instagramId",
   "source: \"meta_webhook\"",
+  "fetchFacebookCustomerProfile",
+  'url.searchParams.set("fields", "name,profile_pic")',
+  'url.searchParams.set("access_token", channel.access_token)',
+  "avatar_url: profile?.avatarUrl ?? null",
+  "avatar_url: profile.avatarUrl ?? existing.avatar_url",
+  "name: profile.name ?? existing.name",
+  "Facebook User ${platformUserId}",
 ]) {
   assert(webhook.includes(operation), `Meta persistence missing: ${operation}`);
 }
@@ -89,7 +102,6 @@ for (const forbidden of [
   "sendAi",
   "generateAi",
   "openai",
-  "graph.facebook.com",
 ]) {
   assert(
     !webhook.toLowerCase().includes(forbidden.toLowerCase()),
@@ -100,6 +112,18 @@ for (const forbidden of [
 assert(
   migration.includes("add column if not exists last_message text"),
   "Missing conversations.last_message migration.",
+);
+assert(
+  identityMigration.includes("add column if not exists avatar_url text"),
+  "Missing customers.avatar_url migration.",
+);
+for (const pattern of ["avatarUrl", "customers(name,avatar_url"]) {
+  assert(inboxData.includes(pattern), `Inbox data missing customer photo: ${pattern}`);
+  assert(inboxModule.includes(pattern), `Inbox UI missing customer photo: ${pattern}`);
+}
+assert(
+  inboxModule.includes("<CustomerAvatar conversation={conversation}"),
+  "Inbox must render the customer profile photo.",
 );
 assert(
   envExample.includes("META_WEBHOOK_VERIFY_TOKEN="),

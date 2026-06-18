@@ -23,7 +23,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
+import { CompanyProfileForm } from "@/components/settings/company-profile-form";
 import { MetaConnectButton } from "@/components/settings/meta-connect-button";
 import { WebhookSubscribeButton } from "@/components/settings/webhook-subscribe-button";
 import { Separator } from "@/components/ui/separator";
@@ -127,36 +127,10 @@ export function SettingsModule({
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-4 lg:grid-cols-[1fr_1fr_auto]">
-            <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="company-name">
-                Company name
-              </label>
-              <Input
-                defaultValue={displayCompany}
-                id="company-name"
-                name="companyName"
-                placeholder="Company name"
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="company-email">
-                Primary contact
-              </label>
-              <Input
-                defaultValue={email ?? ""}
-                id="company-email"
-                name="companyEmail"
-                placeholder="owner@company.com"
-                type="email"
-              />
-            </div>
-            <div className="flex items-end">
-              <Button type="button" variant="outline">
-                Save Profile
-              </Button>
-            </div>
-          </div>
+          <CompanyProfileForm
+            companyName={displayCompany}
+            email={email ?? ""}
+          />
         </CardContent>
       </Card>
 

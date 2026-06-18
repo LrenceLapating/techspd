@@ -6,6 +6,7 @@ const requiredFiles = [
   "src/components/inbox/inbox-module.tsx",
   "src/lib/inbox/data.ts",
   "supabase/migrations/20260617004000_enable_realtime_messages.sql",
+  "supabase/migrations/20260617181441_enable_realtime_conversations.sql",
 ];
 
 const checks = [
@@ -18,10 +19,19 @@ const checks = [
       "postgres_changes",
       'event: "INSERT"',
       'table: "messages"',
+      'event: "*"',
+      'table: "conversations"',
       "filter: `company_id=eq.${companyId}`",
-      "/api/inbox/snapshot",
-      "setSnapshot(nextSnapshot)",
+      "applyRealtimeMessage",
+      "fetchConversationPreview",
+      "fetchConversationMessages",
+      "scrollIntoView",
       "setSelectedConversationId",
+    ],
+    absent: [
+      "/api/inbox/snapshot",
+      "refreshSnapshot",
+      "setSnapshot(nextSnapshot)",
     ],
   },
   {
@@ -53,6 +63,12 @@ const checks = [
     file: "supabase/migrations/20260617004000_enable_realtime_messages.sql",
     patterns: [
       "alter publication supabase_realtime add table public.messages",
+    ],
+  },
+  {
+    file: "supabase/migrations/20260617181441_enable_realtime_conversations.sql",
+    patterns: [
+      "alter publication supabase_realtime add table public.conversations",
     ],
   },
   {

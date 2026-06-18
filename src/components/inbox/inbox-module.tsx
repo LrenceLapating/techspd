@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import {
   Bot,
@@ -9,6 +9,7 @@ import {
   Clock3,
   FileText,
   Laugh,
+  LoaderCircle,
   MapPin,
   MessageSquareText,
   Paperclip,
@@ -44,6 +45,61 @@ const emptySnapshot: InboxSnapshot = {
 
 type RealtimeStatus = "connecting" | "live" | "offline";
 
+type RealtimeMessageRow = {
+  body: string;
+  company_id: string;
+  conversation_id: string;
+  id: string;
+  sender_type: "customer" | "agent" | "owner" | "ai" | "system";
+  sent_at: string;
+};
+
+type RealtimeConversationRow = {
+  channel_id: string | null;
+  company_id: string;
+  customer_id: string;
+  id: string;
+  last_message_at: string | null;
+  updated_at: string;
+};
+
+type ClientConversationRow = RealtimeConversationRow & {
+  channels:
+    | {
+        name: string | null;
+        type: string | null;
+      }
+    | {
+        name: string | null;
+        type: string | null;
+      }[]
+    | null;
+  customers:
+    | {
+        ai_enabled: boolean;
+        avatar_url: string | null;
+        email: string | null;
+        lead_stage: string | null;
+        location: string | null;
+        metadata: Record<string, unknown> | null;
+        name: string;
+        phone: string | null;
+        platform: string | null;
+      }
+    | {
+        ai_enabled: boolean;
+        avatar_url: string | null;
+        email: string | null;
+        lead_stage: string | null;
+        location: string | null;
+        metadata: Record<string, unknown> | null;
+        name: string;
+        phone: string | null;
+        platform: string | null;
+      }[]
+    | null;
+};
+
 export function InboxModule({
   companyId,
   initialSnapshot = emptySnapshot,
@@ -58,7 +114,16 @@ export function InboxModule({
   const [realtimeStatus, setRealtimeStatus] =
     useState<RealtimeStatus>("connecting");
   const [sendError, setSendError] = useState<string | null>(null);
-  const [isPending, startTransition] = useTransition();
+  const selectedConversationIdRef = useRef(selectedConversationId);
+  const conversationsRef = useRef(snapshot.conversations);
+
+  useEffect(() => {
+    selectedConversationIdRef.current = selectedConversationId;
+  }, [selectedConversationId]);
+
+  useEffect(() => {
+    conversationsRef.current = snapshot.conversations;
+  }, [snapshot.conversations]);
 
   const selectedConversation = useMemo(
     () =>
@@ -70,28 +135,6 @@ export function InboxModule({
     [selectedConversationId, snapshot.conversations],
   );
 
-  const refreshSnapshot = (conversationId: string | null) => {
-    startTransition(async () => {
-      const params = new URLSearchParams();
-
-      if (conversationId) {
-        params.set("conversationId", conversationId);
-      }
-
-      const response = await fetch(`/api/inbox/snapshot?${params.toString()}`, {
-        cache: "no-store",
-      });
-
-      if (!response.ok) {
-        return;
-      }
-
-      const nextSnapshot = (await response.json()) as InboxSnapshot;
-      setSnapshot(nextSnapshot);
-      setSelectedConversationId(nextSnapshot.selectedConversationId);
-    });
-  };
-
   useEffect(() => {
     if (!companyId) {
       setRealtimeStatus("offline");
@@ -100,7 +143,7 @@ export function InboxModule({
 
     const supabase = createClient();
     let channel: RealtimeChannel | null = supabase
-      .channel(`company-${companyId}-messages`)
+      .channel(`company-${companyId}-inbox-realtime`)
       .on(
         "postgres_changes",
         {
@@ -109,8 +152,47 @@ export function InboxModule({
           schema: "public",
           table: "messages",
         },
-        () => {
-          refreshSnapshot(selectedConversationId);
+        async (payload) => {
+          const message = payload.new as RealtimeMessageRow;
+
+          applyRealtimeMessage(message);
+
+          if (!hasConversation(message.conversation_id)) {
+            const conversation = await fetchConversationPreview({
+              companyId,
+              conversationId: message.conversation_id,
+              latestMessage: message,
+            });
+
+            if (conversation) {
+              upsertConversation(conversation);
+            }
+          }
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          filter: `company_id=eq.${companyId}`,
+          schema: "public",
+          table: "conversations",
+        },
+        async (payload) => {
+          if (payload.eventType === "DELETE") {
+            return;
+          }
+
+          const conversationRow = payload.new as RealtimeConversationRow;
+          const conversation = await fetchConversationPreview({
+            companyId,
+            conversationId: conversationRow.id,
+            latestMessage: null,
+          });
+
+          if (conversation) {
+            upsertConversation(conversation);
+          }
         },
       )
       .subscribe((status) => {
@@ -123,45 +205,252 @@ export function InboxModule({
         channel = null;
       }
     };
-  }, [companyId, selectedConversationId]);
+  }, [companyId]);
+
+  function hasConversation(conversationId: string) {
+    return conversationsRef.current.some(
+      (conversation) => conversation.id === conversationId,
+    );
+  }
+
+  function applyRealtimeMessage(message: RealtimeMessageRow) {
+    setSnapshot((current) => {
+      const isOpen = selectedConversationIdRef.current === message.conversation_id;
+      const nextMessage = mapRealtimeMessage(message);
+      const shouldAppend =
+        isOpen &&
+        !current.messages.some((existing) => existing.id === nextMessage.id);
+      const nextConversations = moveConversationToTop(
+        current.conversations.map((conversation) => {
+          if (conversation.id !== message.conversation_id) {
+            return conversation;
+          }
+
+          return {
+            ...conversation,
+            lastMessage: message.body,
+            time: relativeTime(message.sent_at),
+            unread:
+              isOpen
+                ? 0
+                : message.sender_type !== "customer"
+                  ? conversation.unread
+                : conversation.unread + 1,
+          };
+        }),
+        message.conversation_id,
+      );
+
+      return {
+        ...current,
+        conversations: nextConversations,
+        messages: shouldAppend
+          ? [...current.messages, nextMessage]
+          : current.messages,
+      };
+    });
+  }
+
+  function upsertConversation(conversation: InboxConversation) {
+    setSnapshot((current) => {
+      const currentConversation = current.conversations.find(
+        (item) => item.id === conversation.id,
+      );
+      const isOpen = selectedConversationIdRef.current === conversation.id;
+      const unread =
+        currentConversation && !isOpen
+          ? Math.max(currentConversation.unread, conversation.unread)
+          : isOpen
+            ? 0
+            : conversation.unread;
+      const withoutConversation = current.conversations.filter(
+        (item) => item.id !== conversation.id,
+      );
+
+      return {
+        ...current,
+        conversations: [
+          {
+            ...(currentConversation ?? conversation),
+            ...conversation,
+            lastMessage:
+              conversation.lastMessage === "No messages yet" && currentConversation
+                ? currentConversation.lastMessage
+                : conversation.lastMessage,
+            time:
+              conversation.time === "--" && currentConversation
+                ? currentConversation.time
+                : conversation.time,
+            unread,
+          },
+          ...withoutConversation,
+        ],
+        selectedConversationId:
+          current.selectedConversationId ?? conversation.id,
+      };
+    });
+
+    setSelectedConversationId((current) => current ?? conversation.id);
+  }
+
+  async function updateCustomerAiEnabled(
+    customerId: string,
+    aiEnabled: boolean,
+  ) {
+    const previousAiEnabled =
+      conversationsRef.current.find(
+        (conversation) => conversation.customer.id === customerId,
+      )?.aiEnabled ?? !aiEnabled;
+    const applyValue = (value: boolean) => {
+      setSnapshot((current) => ({
+        ...current,
+        conversations: current.conversations.map((conversation) =>
+          conversation.customer.id === customerId
+            ? { ...conversation, aiEnabled: value }
+            : conversation,
+        ),
+      }));
+    };
+
+    applyValue(aiEnabled);
+
+    const supabase = createClient();
+    const { data, error } = await supabase
+      .from("customers")
+      .update({ ai_enabled: aiEnabled })
+      .eq("company_id", companyId)
+      .eq("id", customerId)
+      .select("id")
+      .maybeSingle();
+
+    if (error || !data) {
+      applyValue(previousAiEnabled);
+      throw new Error(error?.message ?? "AI reply preference was not saved.");
+    }
+  }
+
+  function addOptimisticMessage(
+    conversationId: string,
+    message: InboxMessage,
+  ) {
+    setSnapshot((current) => ({
+      ...current,
+      conversations: moveConversationToTop(
+        current.conversations.map((conversation) =>
+          conversation.id === conversationId
+            ? {
+                ...conversation,
+                lastMessage: message.body,
+                time: "now",
+              }
+            : conversation,
+        ),
+        conversationId,
+      ),
+      messages:
+        current.selectedConversationId === conversationId
+          ? [...current.messages, message]
+          : current.messages,
+    }));
+  }
+
+  function confirmOptimisticMessage(
+    optimisticId: string,
+    persistedId: string,
+  ) {
+    setSnapshot((current) => {
+      const persistedAlreadyExists = current.messages.some(
+        (message) => message.id === persistedId,
+      );
+
+      return {
+        ...current,
+        messages: persistedAlreadyExists
+          ? current.messages.filter((message) => message.id !== optimisticId)
+          : current.messages.map((message) =>
+              message.id === optimisticId
+                ? { ...message, id: persistedId }
+                : message,
+            ),
+      };
+    });
+  }
+
+  function removeOptimisticMessage(optimisticId: string) {
+    setSnapshot((current) => ({
+      ...current,
+      messages: current.messages.filter(
+        (message) => message.id !== optimisticId,
+      ),
+    }));
+  }
 
   return (
     <section className="grid min-h-[calc(100vh-172px)] gap-4 xl:grid-cols-[320px_minmax(0,1fr)_340px]">
       <ConversationList
         conversations={snapshot.conversations}
-        isPending={isPending}
         onSelect={(conversationId) => {
           setSelectedConversationId(conversationId);
-          refreshSnapshot(conversationId);
+          setSnapshot((current) => ({
+            ...current,
+            conversations: current.conversations.map((conversation) =>
+              conversation.id === conversationId
+                ? {
+                    ...conversation,
+                    unread: 0,
+                  }
+                : conversation,
+            ),
+            messages:
+              conversationId === current.selectedConversationId
+                ? current.messages
+                : [],
+            selectedConversationId: conversationId,
+          }));
+
+          void fetchConversationMessages({ companyId, conversationId }).then(
+            (messages) => {
+              setSnapshot((current) =>
+                current.selectedConversationId === conversationId
+                  ? {
+                      ...current,
+                      messages,
+                    }
+                  : current,
+              );
+            },
+          );
         }}
         realtimeStatus={realtimeStatus}
         selectedConversationId={selectedConversation?.id ?? null}
       />
       <ChatPanel
         conversation={selectedConversation}
-        isRefreshing={isPending}
         messages={snapshot.messages}
-        onMessageSent={() => {
+        onMessageFailed={removeOptimisticMessage}
+        onMessagePending={addOptimisticMessage}
+        onMessageSent={(optimisticId, persistedId) => {
+          confirmOptimisticMessage(optimisticId, persistedId);
           setSendError(null);
-          refreshSnapshot(selectedConversation?.id ?? null);
         }}
         onSendError={setSendError}
         sendError={sendError}
       />
-      <CustomerPanel conversation={selectedConversation} />
+      <CustomerPanel
+        conversation={selectedConversation}
+        onAiEnabledChange={updateCustomerAiEnabled}
+      />
     </section>
   );
 }
 
 function ConversationList({
   conversations,
-  isPending,
   onSelect,
   realtimeStatus,
   selectedConversationId,
 }: {
   conversations: InboxConversation[];
-  isPending: boolean;
   onSelect: (conversationId: string) => void;
   realtimeStatus: RealtimeStatus;
   selectedConversationId: string | null;
@@ -220,7 +509,6 @@ function ConversationList({
               <ConversationCard
                 conversation={conversation}
                 isActive={conversation.id === selectedConversationId}
-                isPending={isPending}
                 key={conversation.id}
                 onSelect={onSelect}
               />
@@ -240,12 +528,10 @@ function ConversationList({
 function ConversationCard({
   conversation,
   isActive,
-  isPending,
   onSelect,
 }: {
   conversation: InboxConversation;
   isActive: boolean;
-  isPending: boolean;
   onSelect: (conversationId: string) => void;
 }) {
   return (
@@ -254,14 +540,11 @@ function ConversationCard({
         "w-full rounded-xl border bg-background/80 p-3 text-left shadow-sm transition-colors hover:border-primary/60 hover:bg-card",
         isActive && "border-primary bg-card ring-2 ring-primary/10",
       )}
-      disabled={isPending}
       onClick={() => onSelect(conversation.id)}
       type="button"
     >
       <div className="flex items-start gap-3">
-        <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-primary text-sm font-semibold text-primary-foreground">
-          {conversation.avatar || "?"}
-        </div>
+        <CustomerAvatar conversation={conversation} size="size-11" />
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">
             <p className="truncate text-sm font-semibold">
@@ -273,8 +556,8 @@ function ConversationCard({
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-1.5">
             <PlatformBadge platform={conversation.platform} />
-            <Badge variant={conversation.aiEnabled ? "success" : "warning"}>
-              {conversation.aiEnabled ? "AI On" : "AI Off"}
+            <Badge variant={conversation.aiEnabled ? "success" : "secondary"}>
+              {conversation.aiEnabled ? "AI Enabled" : "Human Mode"}
             </Badge>
           </div>
           <p className="mt-2 line-clamp-2 text-sm leading-5 text-muted-foreground">
@@ -293,21 +576,31 @@ function ConversationCard({
 
 function ChatPanel({
   conversation,
-  isRefreshing,
   messages,
+  onMessageFailed,
+  onMessagePending,
   onMessageSent,
   onSendError,
   sendError,
 }: {
   conversation: InboxConversation | null;
-  isRefreshing: boolean;
   messages: InboxMessage[];
-  onMessageSent: () => void;
+  onMessageFailed: (optimisticId: string) => void;
+  onMessagePending: (conversationId: string, message: InboxMessage) => void;
+  onMessageSent: (optimisticId: string, persistedId: string) => void;
   onSendError: (message: string | null) => void;
   sendError: string | null;
 }) {
   const [draft, setDraft] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "end",
+    });
+  }, [conversation?.id, messages.length]);
 
   if (!conversation) {
     return (
@@ -337,13 +630,23 @@ function ChatPanel({
 
     setIsSending(true);
     onSendError(null);
+    const messageBody = trimmedDraft;
+    const optimisticId = `optimistic-${crypto.randomUUID()}`;
+
+    setDraft("");
+    onMessagePending(conversation.id, {
+      body: messageBody,
+      id: optimisticId,
+      sender: "owner",
+      time: "now",
+    });
 
     try {
       const response = await fetch("/api/messages/send", {
         body: JSON.stringify({
           conversation_id: conversation.id,
           customer_id: conversation.customer.id,
-          message: trimmedDraft,
+          message: messageBody,
         }),
         headers: {
           "Content-Type": "application/json",
@@ -352,15 +655,17 @@ function ChatPanel({
       });
       const payload = (await response.json().catch(() => ({}))) as {
         error?: string;
+        message_id?: string;
       };
 
       if (!response.ok) {
         throw new Error(payload.error ?? "Manual reply failed.");
       }
 
-      setDraft("");
-      onMessageSent();
+      onMessageSent(optimisticId, payload.message_id ?? optimisticId);
     } catch (error) {
+      onMessageFailed(optimisticId);
+      setDraft(messageBody);
       onSendError(
         error instanceof Error ? error.message : "Manual reply failed.",
       );
@@ -375,9 +680,7 @@ function ChatPanel({
         <div className="border-b p-4">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-center gap-3">
-              <div className="flex size-11 items-center justify-center rounded-xl bg-primary text-sm font-semibold text-primary-foreground">
-                {conversation.avatar || "?"}
-              </div>
+              <CustomerAvatar conversation={conversation} size="size-11" />
               <div className="min-w-0">
                 <h3 className="truncate font-semibold">
                   {conversation.customer.name}
@@ -423,6 +726,7 @@ function ChatPanel({
               No messages yet for this customer.
             </div>
           )}
+          <div ref={messagesEndRef} />
         </div>
 
         <div className="border-t bg-card p-4">
@@ -475,11 +779,16 @@ function ChatPanel({
               value={draft}
             />
             <Button
-              disabled={!trimmedDraft || isSending || isRefreshing}
+              className="min-w-32"
+              disabled={!trimmedDraft || isSending}
               type="submit"
             >
-              <Send className="size-4" />
-              {isSending ? "Sending" : "Send"}
+              {isSending ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : (
+                <Send className="size-4" />
+              )}
+              {isSending ? "Sending..." : "Send Message"}
             </Button>
           </form>
         </div>
@@ -525,9 +834,19 @@ function ChatBubble({ message }: { message: InboxMessage }) {
 
 function CustomerPanel({
   conversation,
+  onAiEnabledChange,
 }: {
   conversation: InboxConversation | null;
+  onAiEnabledChange: (customerId: string, enabled: boolean) => Promise<void>;
 }) {
+  const [isSavingAi, setIsSavingAi] = useState(false);
+  const [aiSaveError, setAiSaveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setAiSaveError(null);
+    setIsSavingAi(false);
+  }, [conversation?.id]);
+
   if (!conversation) {
     return (
       <Card className="overflow-hidden shadow-sm">
@@ -546,17 +865,15 @@ function CustomerPanel({
             Customer record
           </p>
           <div className="mt-3 flex items-center gap-3">
-            <div className="flex size-12 items-center justify-center rounded-xl bg-primary text-base font-semibold text-primary-foreground">
-              {conversation.avatar || "?"}
-            </div>
+            <CustomerAvatar conversation={conversation} size="size-12" />
             <div className="min-w-0">
               <h3 className="truncate font-semibold">
                 {conversation.customer.name}
               </h3>
               <div className="mt-1 flex items-center gap-2">
                 <PlatformBadge platform={conversation.platform} />
-                <Badge variant={conversation.aiEnabled ? "success" : "warning"}>
-                  {conversation.aiEnabled ? "AI enabled" : "AI disabled"}
+                <Badge variant={conversation.aiEnabled ? "success" : "secondary"}>
+                  {conversation.aiEnabled ? "AI Enabled" : "Human Mode"}
                 </Badge>
               </div>
             </div>
@@ -633,20 +950,64 @@ function CustomerPanel({
           </select>
         </div>
 
-        <div className="space-y-3 rounded-xl border bg-background/72 p-3">
-          <label className="flex items-center justify-between gap-3 text-sm font-medium">
-            <span>AI Auto Reply</span>
-            <input
-              aria-label="AI Auto Reply toggle"
-              className="size-5 accent-primary"
-              defaultChecked={conversation.aiEnabled}
-              name="ai_enabled"
-              type="checkbox"
-            />
-          </label>
-          {!conversation.aiEnabled ? (
-            <p className="rounded-lg bg-[#fff7ed] px-3 py-2 text-xs font-medium text-[#9a3412]">
-              Human Mode Active - AI will not reply
+        <div className="space-y-3 rounded-lg border bg-background/72 p-3">
+          <div className="flex items-center justify-between gap-4">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-sm font-semibold">AI Auto Reply</p>
+                <Badge
+                  variant={conversation.aiEnabled ? "success" : "secondary"}
+                >
+                  {conversation.aiEnabled ? "AI Enabled" : "Human Mode"}
+                </Badge>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {conversation.aiEnabled
+                  ? "AI replies enabled"
+                  : "Human mode active"}
+              </p>
+            </div>
+            <button
+              aria-checked={conversation.aiEnabled}
+              aria-label="AI Auto Reply"
+              className={cn(
+                "relative h-6 w-11 shrink-0 rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-70",
+                conversation.aiEnabled ? "bg-[#16a34a]" : "bg-[#9ca3af]",
+              )}
+              disabled={isSavingAi}
+              onClick={async () => {
+                setIsSavingAi(true);
+                setAiSaveError(null);
+
+                try {
+                  await onAiEnabledChange(
+                    conversation.customer.id,
+                    !conversation.aiEnabled,
+                  );
+                } catch (error) {
+                  setAiSaveError(
+                    error instanceof Error
+                      ? error.message
+                      : "AI reply preference was not saved.",
+                  );
+                } finally {
+                  setIsSavingAi(false);
+                }
+              }}
+              role="switch"
+              type="button"
+            >
+              <span
+                className={cn(
+                  "absolute left-0.5 top-0.5 size-5 rounded-full bg-white shadow-sm transition-transform",
+                  conversation.aiEnabled && "translate-x-5",
+                )}
+              />
+            </button>
+          </div>
+          {aiSaveError ? (
+            <p className="text-xs font-medium text-destructive" role="alert">
+              {aiSaveError}
             </p>
           ) : null}
           <label className="flex items-center justify-between gap-3 text-sm font-medium">
@@ -710,6 +1071,243 @@ function PlatformBadge({ platform }: { platform: InboxConversation["platform"] }
       {platform}
     </Badge>
   );
+}
+
+function CustomerAvatar({
+  conversation,
+  size,
+}: {
+  conversation: InboxConversation;
+  size: "size-11" | "size-12";
+}) {
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [conversation.avatarUrl]);
+
+  return (
+    <div
+      className={cn(
+        "flex shrink-0 items-center justify-center overflow-hidden rounded-xl bg-primary font-semibold text-primary-foreground",
+        size,
+        size === "size-12" ? "text-base" : "text-sm",
+      )}
+    >
+      {conversation.avatarUrl && !failed ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          alt={`${conversation.customer.name} profile`}
+          className="size-full object-cover"
+          onError={() => setFailed(true)}
+          src={conversation.avatarUrl}
+        />
+      ) : (
+        conversation.avatar || "?"
+      )}
+    </div>
+  );
+}
+
+async function fetchConversationPreview({
+  companyId,
+  conversationId,
+  latestMessage,
+}: {
+  companyId: string;
+  conversationId: string;
+  latestMessage: RealtimeMessageRow | null;
+}) {
+  const supabase = createClient();
+  const { data, error } = await supabase
+    .from("conversations")
+    .select(
+      "id, company_id, customer_id, channel_id, last_message_at, updated_at, customers(name,avatar_url,email,phone,location,platform,ai_enabled,lead_stage,metadata), channels(name,type)",
+    )
+    .eq("company_id", companyId)
+    .eq("id", conversationId)
+    .single();
+
+  if (error || !data) {
+    return null;
+  }
+
+  let resolvedLatestMessage = latestMessage;
+
+  if (!resolvedLatestMessage) {
+    const { data: messageData } = await supabase
+      .from("messages")
+      .select("id, company_id, conversation_id, sender_type, body, sent_at")
+      .eq("company_id", companyId)
+      .eq("conversation_id", conversationId)
+      .order("sent_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    resolvedLatestMessage = (messageData as RealtimeMessageRow | null) ?? null;
+  }
+
+  return mapRealtimeConversation(
+    data as ClientConversationRow,
+    resolvedLatestMessage,
+  );
+}
+
+async function fetchConversationMessages({
+  companyId,
+  conversationId,
+}: {
+  companyId: string;
+  conversationId: string;
+}) {
+  const supabase = createClient();
+  const { data } = await supabase
+    .from("messages")
+    .select("id, company_id, conversation_id, sender_type, body, sent_at")
+    .eq("company_id", companyId)
+    .eq("conversation_id", conversationId)
+    .order("sent_at", { ascending: true })
+    .limit(100);
+
+  return ((data ?? []) as RealtimeMessageRow[]).map(mapRealtimeMessage);
+}
+
+function mapRealtimeConversation(
+  conversation: ClientConversationRow,
+  latestMessage: RealtimeMessageRow | null,
+): InboxConversation {
+  const customer = Array.isArray(conversation.customers)
+    ? conversation.customers[0]
+    : conversation.customers;
+  const channel = Array.isArray(conversation.channels)
+    ? conversation.channels[0]
+    : conversation.channels;
+  const platform = platformLabel(
+    customer?.platform ?? channel?.name ?? channel?.type,
+  );
+  const name = customer?.name ?? "Unknown customer";
+
+  return {
+    aiEnabled: customer?.ai_enabled ?? true,
+    avatar: initials(name),
+    avatarUrl: customer?.avatar_url ?? null,
+    customer: {
+      email: customer?.email ?? "No email yet",
+      id: conversation.customer_id,
+      location: customer?.location ?? "Location unavailable",
+      name,
+      notes: metadataNotes(customer?.metadata),
+      phone: customer?.phone ?? "No phone yet",
+      tags: [platform],
+    },
+    id: conversation.id,
+    lastMessage: latestMessage?.body ?? "No messages yet",
+    leadStage: formatLeadStage(customer?.lead_stage ?? "new"),
+    platform,
+    time: relativeTime(latestMessage?.sent_at ?? conversation.last_message_at),
+    unread: latestMessage?.sender_type === "customer" ? 1 : 0,
+  };
+}
+
+function mapRealtimeMessage(message: RealtimeMessageRow): InboxMessage {
+  return {
+    body: message.body,
+    id: message.id,
+    sender:
+      message.sender_type === "customer"
+        ? "customer"
+        : message.sender_type === "agent" || message.sender_type === "owner"
+          ? "owner"
+          : "ai",
+    time: new Intl.DateTimeFormat("en", {
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(new Date(message.sent_at)),
+  };
+}
+
+function moveConversationToTop(
+  conversations: InboxConversation[],
+  conversationId: string,
+) {
+  const conversation = conversations.find((item) => item.id === conversationId);
+
+  if (!conversation) {
+    return conversations;
+  }
+
+  return [
+    conversation,
+    ...conversations.filter((item) => item.id !== conversationId),
+  ];
+}
+
+function platformLabel(value?: string | null) {
+  const normalized = (value ?? "unknown").toLowerCase();
+
+  if (normalized.includes("facebook")) {
+    return "Facebook";
+  }
+
+  if (normalized.includes("instagram")) {
+    return "Instagram";
+  }
+
+  if (normalized.includes("tiktok") || normalized.includes("tik tok")) {
+    return "TikTok";
+  }
+
+  return "Unknown";
+}
+
+function formatLeadStage(value: string) {
+  return value
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function initials(name: string) {
+  return name
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("");
+}
+
+function metadataNotes(metadata: Record<string, unknown> | null | undefined) {
+  const note = metadata?.notes ?? metadata?.conversion_notes;
+
+  if (typeof note === "string" && note.trim()) {
+    return [note];
+  }
+
+  return ["No notes yet."];
+}
+
+function relativeTime(value?: string | null) {
+  if (!value) {
+    return "--";
+  }
+
+  const diff = Date.now() - new Date(value).getTime();
+  const minutes = Math.max(Math.floor(diff / 60000), 0);
+
+  if (minutes < 1) {
+    return "now";
+  }
+
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+
+  if (hours < 24) {
+    return `${hours}h`;
+  }
+
+  return `${Math.floor(hours / 24)}d`;
 }
 
 function RealtimeBadge({ status }: { status: RealtimeStatus }) {

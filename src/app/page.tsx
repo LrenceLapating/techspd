@@ -1,6 +1,8 @@
 import Link from "next/link";
+import { Suspense } from "react";
 import { DashboardShell } from "@/components/dashboard/dashboard-shell";
 import { InboxModule } from "@/components/inbox/inbox-module";
+import { InboxSkeleton } from "@/components/loading/dashboard-skeletons";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -41,10 +43,6 @@ export default async function Home() {
     );
   }
 
-  const inboxSnapshot = context.companyId
-    ? await getInboxSnapshot({ companyId: context.companyId })
-    : undefined;
-
   return (
     <DashboardShell
       activeSection="Inbox"
@@ -52,10 +50,19 @@ export default async function Home() {
       counts={context.counts}
       email={context.email}
     >
-      <InboxModule
-        companyId={context.companyId ?? ""}
-        initialSnapshot={inboxSnapshot}
-      />
+      <Suspense fallback={<InboxSkeleton />}>
+        <InboxContent companyId={context.companyId ?? ""} />
+      </Suspense>
     </DashboardShell>
+  );
+}
+
+async function InboxContent({ companyId }: { companyId: string }) {
+  const inboxSnapshot = companyId
+    ? await getInboxSnapshot({ companyId })
+    : undefined;
+
+  return (
+    <InboxModule companyId={companyId} initialSnapshot={inboxSnapshot} />
   );
 }

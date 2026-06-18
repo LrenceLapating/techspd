@@ -79,9 +79,13 @@ assert(
   context.includes("companyId") && context.includes("company_id"),
   "Dashboard context must expose authenticated companyId for analytics.",
 );
+const streamsAnalytics =
+  page.includes("<AnalyticsContent companyId={context.companyId}") &&
+  page.includes("getAnalyticsData(companyId)") &&
+  page.includes("<AnalyticsModule analytics={analytics} />") &&
+  page.includes("<Suspense fallback={<AnalyticsSkeleton />}");
 assert(
-  page.includes("getAnalyticsData(context.companyId)") &&
-    page.includes("<AnalyticsModule analytics={analytics} />"),
+  streamsAnalytics,
   "Analytics route must fetch tenant analytics and render AnalyticsModule.",
 );
 assert(pkg.includes("\"verify:step6\""), "Missing verify:step6 package script.");

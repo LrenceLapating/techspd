@@ -1,6 +1,8 @@
 import { redirect } from "next/navigation";
+import { Suspense } from "react";
 import { AnalyticsModule } from "@/components/analytics/analytics-module";
 import { DashboardShell } from "@/components/dashboard/dashboard-shell";
+import { AnalyticsSkeleton } from "@/components/loading/dashboard-skeletons";
 import { getAnalyticsData } from "@/lib/analytics/data";
 import { getDashboardContext } from "@/lib/dashboard/context";
 
@@ -13,8 +15,6 @@ export default async function AnalyticsPage() {
     redirect("/");
   }
 
-  const analytics = await getAnalyticsData(context.companyId);
-
   return (
     <DashboardShell
       activeSection="Analytics"
@@ -22,7 +22,15 @@ export default async function AnalyticsPage() {
       counts={context.counts}
       email={context.email}
     >
-      <AnalyticsModule analytics={analytics} />
+      <Suspense fallback={<AnalyticsSkeleton />}>
+        <AnalyticsContent companyId={context.companyId} />
+      </Suspense>
     </DashboardShell>
   );
+}
+
+async function AnalyticsContent({ companyId }: { companyId?: string }) {
+  const analytics = await getAnalyticsData(companyId);
+
+  return <AnalyticsModule analytics={analytics} />;
 }

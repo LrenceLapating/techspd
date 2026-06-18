@@ -5,6 +5,7 @@ import { formatLeadStage, formatPlatform } from "@/lib/sales/data";
 export type InboxConversation = {
   aiEnabled: boolean;
   avatar: string;
+  avatarUrl: string | null;
   customer: {
     email: string;
     id: string;
@@ -51,6 +52,7 @@ type ConversationRow = {
   customers:
     | {
         ai_enabled: boolean;
+        avatar_url: string | null;
         email: string | null;
         lead_stage: string | null;
         location: string | null;
@@ -61,6 +63,7 @@ type ConversationRow = {
       }
     | {
         ai_enabled: boolean;
+        avatar_url: string | null;
         email: string | null;
         lead_stage: string | null;
         location: string | null;
@@ -97,7 +100,7 @@ export async function getInboxSnapshot({
   const { data: conversationsData, error: conversationsError } = await supabase
     .from("conversations")
     .select(
-      "id, customer_id, channel_id, last_message_at, updated_at, customers(name,email,phone,location,platform,ai_enabled,lead_stage,metadata), channels(name,type)",
+      "id, customer_id, channel_id, last_message_at, updated_at, customers(name,avatar_url,email,phone,location,platform,ai_enabled,lead_stage,metadata), channels(name,type)",
     )
     .eq("company_id", companyId)
     .order("last_message_at", { ascending: false, nullsFirst: false })
@@ -198,6 +201,7 @@ function mapConversation(
   return {
     aiEnabled: customer?.ai_enabled ?? true,
     avatar: initials(name),
+    avatarUrl: customer?.avatar_url ?? null,
     customer: {
       email: customer?.email ?? "No email yet",
       id: conversation.customer_id,
