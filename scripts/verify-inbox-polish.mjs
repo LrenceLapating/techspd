@@ -37,6 +37,10 @@ const checks = [
       "isNearBottomRef",
       "distanceFromBottom < 120",
       "Jump to latest message",
+      "refreshSnapshotAfterRealtimeEvent",
+      "mergeMessages",
+      "snapshotRefreshSequenceRef",
+      "stale snapshot fallback ignored",
     ],
   },
 ];

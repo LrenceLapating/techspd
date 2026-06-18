@@ -137,6 +137,8 @@ export function InboxModule({
   const selectedConversationIdRef = useRef(selectedConversationId);
   const conversationsRef = useRef(snapshot.conversations);
   const realtimeChannelRef = useRef<RealtimeChannel | null>(null);
+  const snapshotRefreshAppliedRef = useRef(0);
+  const snapshotRefreshSequenceRef = useRef(0);
   const typingTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>(
     {},
   );
@@ -216,6 +218,16 @@ export function InboxModule({
         async (payload) => {
           const message = payload.new as RealtimeMessageRow;
 
+          console.info("[TechSpd Realtime] messages INSERT received", {
+            companyId: message.company_id,
+            conversationId: message.conversation_id,
+            messageId: message.id,
+            senderType: message.sender_type,
+          });
+          const fallbackRefresh = refreshSnapshotAfterRealtimeEvent(
+            "messages:INSERT",
+          );
+
           applyRealtimeMessage(message);
           const knownConversation = conversationsRef.current.find(
             (conversation) => conversation.id === message.conversation_id,
@@ -247,22 +259,31 @@ export function InboxModule({
               }
             }
           }
+
+          await fallbackRefresh;
         },
       )
       .on(
         "postgres_changes",
         {
-          event: "*",
+          event: "UPDATE",
           filter: `company_id=eq.${companyId}`,
           schema: "public",
           table: "conversations",
         },
         async (payload) => {
-          if (payload.eventType === "DELETE") {
-            return;
-          }
-
           const conversationRow = payload.new as RealtimeConversationRow;
+
+          console.info("[TechSpd Realtime] conversations UPDATE received", {
+            companyId: conversationRow.company_id,
+            conversationId: conversationRow.id,
+            lastReadAt: conversationRow.last_read_at,
+            unreadCount: conversationRow.unread_count,
+          });
+          const fallbackRefresh = refreshSnapshotAfterRealtimeEvent(
+            "conversations:UPDATE",
+          );
+
           const conversation = await fetchConversationPreview({
             companyId,
             conversationId: conversationRow.id,
@@ -272,10 +293,36 @@ export function InboxModule({
           if (conversation) {
             upsertConversation(conversation);
           }
+
+          await fallbackRefresh;
         },
       )
       .subscribe((status) => {
-        setRealtimeStatus(status === "SUBSCRIBED" ? "live" : "connecting");
+        if (status === "SUBSCRIBED") {
+          console.info("[TechSpd Realtime] channel subscribed", {
+            channel: `company-${companyId}-inbox-realtime`,
+            companyId,
+            conversationFilter: `company_id=eq.${companyId}`,
+            messageFilter: `company_id=eq.${companyId}`,
+          });
+          setRealtimeStatus("live");
+          return;
+        }
+
+        if (
+          status === "CHANNEL_ERROR" ||
+          status === "TIMED_OUT" ||
+          status === "CLOSED"
+        ) {
+          console.error("[TechSpd Realtime] channel unavailable", {
+            companyId,
+            status,
+          });
+          setRealtimeStatus("offline");
+          return;
+        }
+
+        setRealtimeStatus("connecting");
       });
 
     realtimeChannelRef.current = channel;
@@ -337,6 +384,93 @@ export function InboxModule({
           : current.messages,
       };
     });
+  }
+
+  async function refreshSnapshotAfterRealtimeEvent(source: string) {
+    const refreshSequence = ++snapshotRefreshSequenceRef.current;
+    const selectedAtRequest = selectedConversationIdRef.current;
+    const searchParams = new URLSearchParams();
+
+    if (selectedAtRequest) {
+      searchParams.set("conversationId", selectedAtRequest);
+    }
+
+    try {
+      const response = await fetch(
+        `/api/inbox/snapshot${searchParams.size ? `?${searchParams}` : ""}`,
+        {
+          cache: "no-store",
+          credentials: "same-origin",
+        },
+      );
+
+      if (!response.ok) {
+        console.warn("[TechSpd Realtime] snapshot fallback failed", {
+          source,
+          status: response.status,
+        });
+        return;
+      }
+
+      const refreshed = (await response.json()) as InboxSnapshot;
+
+      if (refreshSequence < snapshotRefreshAppliedRef.current) {
+        console.info("[TechSpd Realtime] stale snapshot fallback ignored", {
+          refreshSequence,
+          source,
+        });
+        return;
+      }
+
+      snapshotRefreshAppliedRef.current = refreshSequence;
+
+      setSelectedConversationId(
+        (current) => current ?? refreshed.selectedConversationId,
+      );
+      setSnapshot((current) => {
+        const activeConversationId = current.selectedConversationId;
+        const currentActiveConversation = current.conversations.find(
+          (conversation) => conversation.id === activeConversationId,
+        );
+        const conversations = refreshed.conversations.map((conversation) =>
+          conversation.id === activeConversationId
+            ? {
+                ...conversation,
+                lastReadAt:
+                  currentActiveConversation?.lastReadAt ?? conversation.lastReadAt,
+                unread: 0,
+              }
+            : conversation,
+        );
+        const localDeliveryMessages = current.messages.filter(
+          (message) =>
+            message.id.startsWith("optimistic-") &&
+            (message.status === "sending" || message.status === "failed"),
+        );
+        const shouldRefreshMessages =
+          current.selectedConversationId === selectedAtRequest;
+
+        return {
+          conversations,
+          messages: shouldRefreshMessages
+            ? mergeMessages(refreshed.messages, localDeliveryMessages)
+            : current.messages,
+          selectedConversationId:
+            current.selectedConversationId ?? refreshed.selectedConversationId,
+        };
+      });
+
+      console.info("[TechSpd Realtime] snapshot fallback refreshed", {
+        conversationCount: refreshed.conversations.length,
+        selectedConversationId: selectedAtRequest,
+        source,
+      });
+    } catch (error) {
+      console.error("[TechSpd Realtime] snapshot fallback error", {
+        error,
+        source,
+      });
+    }
   }
 
   async function markConversationRead(conversationId: string) {
@@ -1572,6 +1706,21 @@ function moveConversationToTop(
     conversation,
     ...conversations.filter((item) => item.id !== conversationId),
   ];
+}
+
+function mergeMessages(
+  persistedMessages: InboxMessage[],
+  localMessages: InboxMessage[],
+) {
+  const messagesById = new Map(
+    persistedMessages.map((message) => [message.id, message]),
+  );
+
+  for (const message of localMessages) {
+    messagesById.set(message.id, message);
+  }
+
+  return Array.from(messagesById.values());
 }
 
 function platformLabel(value?: string | null) {
