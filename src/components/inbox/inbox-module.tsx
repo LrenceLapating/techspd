@@ -4,8 +4,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import {
   AlertCircle,
-  ArrowDown,
-  Bell,
   Bot,
   Camera,
   Check,
@@ -58,63 +56,6 @@ type RealtimeMessageRow = {
   sent_at: string;
 };
 
-type RealtimeConversationRow = {
-  channel_id: string | null;
-  company_id: string;
-  customer_id: string;
-  id: string;
-  last_message_at: string | null;
-  last_read_at: string | null;
-  unread_count: number;
-  updated_at: string;
-};
-
-type TypingPayload = {
-  actor: "customer" | "owner";
-  companyId: string;
-  conversationId: string;
-  isTyping: boolean;
-};
-
-type NotificationPermissionState = NotificationPermission | "unsupported";
-
-type ClientConversationRow = RealtimeConversationRow & {
-  channels:
-    | {
-        name: string | null;
-        type: string | null;
-      }
-    | {
-        name: string | null;
-        type: string | null;
-      }[]
-    | null;
-  customers:
-    | {
-        ai_enabled: boolean;
-        avatar_url: string | null;
-        email: string | null;
-        lead_stage: string | null;
-        location: string | null;
-        metadata: Record<string, unknown> | null;
-        name: string;
-        phone: string | null;
-        platform: string | null;
-      }
-    | {
-        ai_enabled: boolean;
-        avatar_url: string | null;
-        email: string | null;
-        lead_stage: string | null;
-        location: string | null;
-        metadata: Record<string, unknown> | null;
-        name: string;
-        phone: string | null;
-        platform: string | null;
-      }[]
-    | null;
-};
-
 export function InboxModule({
   companyId,
   initialSnapshot = emptySnapshot,
@@ -129,34 +70,11 @@ export function InboxModule({
   const [realtimeStatus, setRealtimeStatus] =
     useState<RealtimeStatus>("connecting");
   const [sendError, setSendError] = useState<string | null>(null);
-  const [notificationPermission, setNotificationPermission] =
-    useState<NotificationPermissionState>("unsupported");
-  const [typingByConversation, setTypingByConversation] = useState<
-    Record<string, boolean>
-  >({});
-  const selectedConversationIdRef = useRef(selectedConversationId);
   const conversationsRef = useRef(snapshot.conversations);
-  const realtimeChannelRef = useRef<RealtimeChannel | null>(null);
-  const snapshotRefreshAppliedRef = useRef(0);
-  const snapshotRefreshSequenceRef = useRef(0);
-  const typingTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>(
-    {},
-  );
-  const audioContextRef = useRef<AudioContext | null>(null);
-
-  useEffect(() => {
-    selectedConversationIdRef.current = selectedConversationId;
-  }, [selectedConversationId]);
 
   useEffect(() => {
     conversationsRef.current = snapshot.conversations;
   }, [snapshot.conversations]);
-
-  useEffect(() => {
-    setNotificationPermission(
-      "Notification" in window ? Notification.permission : "unsupported",
-    );
-  }, []);
 
   const selectedConversation = useMemo(
     () =>
@@ -176,37 +94,7 @@ export function InboxModule({
 
     const supabase = createClient();
     let channel: RealtimeChannel | null = supabase
-      .channel(`company-${companyId}-inbox-realtime`)
-      .on("broadcast", { event: "typing" }, ({ payload }) => {
-        const typing = payload as TypingPayload;
-
-        if (
-          typing.companyId !== companyId ||
-          typing.actor !== "customer" ||
-          !typing.conversationId
-        ) {
-          return;
-        }
-
-        const existingTimeout = typingTimeoutsRef.current[typing.conversationId];
-        if (existingTimeout) {
-          clearTimeout(existingTimeout);
-        }
-
-        setTypingByConversation((current) => ({
-          ...current,
-          [typing.conversationId]: typing.isTyping,
-        }));
-
-        if (typing.isTyping) {
-          typingTimeoutsRef.current[typing.conversationId] = setTimeout(() => {
-            setTypingByConversation((current) => ({
-              ...current,
-              [typing.conversationId]: false,
-            }));
-          }, 4_000);
-        }
-      })
+      .channel(`company-${companyId}-messages`)
       .on(
         "postgres_changes",
         {
@@ -218,91 +106,20 @@ export function InboxModule({
         async (payload) => {
           const message = payload.new as RealtimeMessageRow;
 
-          console.info("[TechSpd Realtime] messages INSERT received", {
+          console.info("[TechSpd Realtime] message insert received", {
             companyId: message.company_id,
             conversationId: message.conversation_id,
             messageId: message.id,
             senderType: message.sender_type,
           });
-          const fallbackRefresh = refreshSnapshotAfterRealtimeEvent(
-            "messages:INSERT",
-          );
-
-          applyRealtimeMessage(message);
-          const knownConversation = conversationsRef.current.find(
-            (conversation) => conversation.id === message.conversation_id,
-          );
-
-          if (message.sender_type === "customer") {
-            if (knownConversation) {
-              notifyCustomerMessage(message, knownConversation);
-            } else {
-              playNotificationSound();
-            }
-
-            if (selectedConversationIdRef.current === message.conversation_id) {
-              void markConversationRead(message.conversation_id);
-            }
-          }
-
-          if (!knownConversation) {
-            const conversation = await fetchConversationPreview({
-              companyId,
-              conversationId: message.conversation_id,
-              latestMessage: message,
-            });
-
-            if (conversation) {
-              upsertConversation(conversation);
-              if (message.sender_type === "customer") {
-                showDesktopNotification(message, conversation);
-              }
-            }
-          }
-
-          await fallbackRefresh;
+          await refreshInboxSnapshot(selectedConversationId);
         },
       )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          filter: `company_id=eq.${companyId}`,
-          schema: "public",
-          table: "conversations",
-        },
-        async (payload) => {
-          const conversationRow = payload.new as RealtimeConversationRow;
-
-          console.info("[TechSpd Realtime] conversations UPDATE received", {
-            companyId: conversationRow.company_id,
-            conversationId: conversationRow.id,
-            lastReadAt: conversationRow.last_read_at,
-            unreadCount: conversationRow.unread_count,
-          });
-          const fallbackRefresh = refreshSnapshotAfterRealtimeEvent(
-            "conversations:UPDATE",
-          );
-
-          const conversation = await fetchConversationPreview({
-            companyId,
-            conversationId: conversationRow.id,
-            latestMessage: null,
-          });
-
-          if (conversation) {
-            upsertConversation(conversation);
-          }
-
-          await fallbackRefresh;
-        },
-      )
-      .subscribe((status) => {
+      .subscribe((status, error) => {
         if (status === "SUBSCRIBED") {
-          console.info("[TechSpd Realtime] channel subscribed", {
-            channel: `company-${companyId}-inbox-realtime`,
+          console.info("[TechSpd Realtime] realtime subscribed", {
+            channel: `company-${companyId}-messages`,
             companyId,
-            conversationFilter: `company_id=eq.${companyId}`,
             messageFilter: `company_id=eq.${companyId}`,
           });
           setRealtimeStatus("live");
@@ -314,8 +131,9 @@ export function InboxModule({
           status === "TIMED_OUT" ||
           status === "CLOSED"
         ) {
-          console.error("[TechSpd Realtime] channel unavailable", {
+          console.error("[TechSpd Realtime] realtime error", {
             companyId,
+            error,
             status,
           });
           setRealtimeStatus("offline");
@@ -325,74 +143,19 @@ export function InboxModule({
         setRealtimeStatus("connecting");
       });
 
-    realtimeChannelRef.current = channel;
-
     return () => {
       if (channel) {
         void supabase.removeChannel(channel);
         channel = null;
       }
-      realtimeChannelRef.current = null;
-      Object.values(typingTimeoutsRef.current).forEach(clearTimeout);
-      typingTimeoutsRef.current = {};
     };
-    // Subscription callbacks intentionally read the latest selection from refs.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [companyId]);
-
-  useEffect(() => {
-    if (selectedConversationId) {
-      void markConversationRead(selectedConversationId);
-    }
-    // markConversationRead is scoped to the active company for this mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [companyId, selectedConversationId]);
 
-  function applyRealtimeMessage(message: RealtimeMessageRow) {
-    setSnapshot((current) => {
-      const isOpen = selectedConversationIdRef.current === message.conversation_id;
-      const nextMessage = mapRealtimeMessage(message);
-      const shouldAppend =
-        isOpen &&
-        !current.messages.some((existing) => existing.id === nextMessage.id);
-      const nextConversations = moveConversationToTop(
-        current.conversations.map((conversation) => {
-          if (conversation.id !== message.conversation_id) {
-            return conversation;
-          }
-
-          return {
-            ...conversation,
-            lastMessage: message.body,
-            time: relativeTime(message.sent_at),
-            unread:
-              isOpen
-                ? 0
-                : message.sender_type !== "customer"
-                  ? conversation.unread
-                : conversation.unread + 1,
-          };
-        }),
-        message.conversation_id,
-      );
-
-      return {
-        ...current,
-        conversations: nextConversations,
-        messages: shouldAppend
-          ? [...current.messages, nextMessage]
-          : current.messages,
-      };
-    });
-  }
-
-  async function refreshSnapshotAfterRealtimeEvent(source: string) {
-    const refreshSequence = ++snapshotRefreshSequenceRef.current;
-    const selectedAtRequest = selectedConversationIdRef.current;
+  async function refreshInboxSnapshot(conversationId: string | null) {
     const searchParams = new URLSearchParams();
 
-    if (selectedAtRequest) {
-      searchParams.set("conversationId", selectedAtRequest);
+    if (conversationId) {
+      searchParams.set("conversationId", conversationId);
     }
 
     try {
@@ -405,186 +168,25 @@ export function InboxModule({
       );
 
       if (!response.ok) {
-        console.warn("[TechSpd Realtime] snapshot fallback failed", {
-          source,
+        console.error("[TechSpd Realtime] snapshot refresh error", {
           status: response.status,
         });
         return;
       }
 
       const refreshed = (await response.json()) as InboxSnapshot;
+      setSnapshot(refreshed);
+      setSelectedConversationId(refreshed.selectedConversationId);
 
-      if (refreshSequence < snapshotRefreshAppliedRef.current) {
-        console.info("[TechSpd Realtime] stale snapshot fallback ignored", {
-          refreshSequence,
-          source,
-        });
-        return;
-      }
-
-      snapshotRefreshAppliedRef.current = refreshSequence;
-
-      setSelectedConversationId(
-        (current) => current ?? refreshed.selectedConversationId,
-      );
-      setSnapshot((current) => {
-        const activeConversationId = current.selectedConversationId;
-        const currentActiveConversation = current.conversations.find(
-          (conversation) => conversation.id === activeConversationId,
-        );
-        const conversations = refreshed.conversations.map((conversation) =>
-          conversation.id === activeConversationId
-            ? {
-                ...conversation,
-                lastReadAt:
-                  currentActiveConversation?.lastReadAt ?? conversation.lastReadAt,
-                unread: 0,
-              }
-            : conversation,
-        );
-        const localDeliveryMessages = current.messages.filter(
-          (message) =>
-            message.id.startsWith("optimistic-") &&
-            (message.status === "sending" || message.status === "failed"),
-        );
-        const shouldRefreshMessages =
-          current.selectedConversationId === selectedAtRequest;
-
-        return {
-          conversations,
-          messages: shouldRefreshMessages
-            ? mergeMessages(refreshed.messages, localDeliveryMessages)
-            : current.messages,
-          selectedConversationId:
-            current.selectedConversationId ?? refreshed.selectedConversationId,
-        };
-      });
-
-      console.info("[TechSpd Realtime] snapshot fallback refreshed", {
+      console.info("[TechSpd Realtime] snapshot refreshed", {
         conversationCount: refreshed.conversations.length,
-        selectedConversationId: selectedAtRequest,
-        source,
+        selectedConversationId: refreshed.selectedConversationId,
       });
     } catch (error) {
-      console.error("[TechSpd Realtime] snapshot fallback error", {
+      console.error("[TechSpd Realtime] snapshot refresh error", {
         error,
-        source,
       });
     }
-  }
-
-  async function markConversationRead(conversationId: string) {
-    const readAt = new Date().toISOString();
-
-    setSnapshot((current) => ({
-      ...current,
-      conversations: current.conversations.map((conversation) =>
-        conversation.id === conversationId
-          ? { ...conversation, lastReadAt: readAt, unread: 0 }
-          : conversation,
-      ),
-    }));
-
-    const supabase = createClient();
-    await supabase
-      .from("conversations")
-      .update({ last_read_at: readAt, unread_count: 0 })
-      .eq("company_id", companyId)
-      .eq("id", conversationId);
-  }
-
-  function playNotificationSound() {
-    try {
-      const AudioContextClass =
-        window.AudioContext ??
-        (window as typeof window & { webkitAudioContext?: typeof AudioContext })
-          .webkitAudioContext;
-
-      if (!AudioContextClass) {
-        return;
-      }
-
-      const context = audioContextRef.current ?? new AudioContextClass();
-      audioContextRef.current = context;
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      oscillator.frequency.setValueAtTime(740, context.currentTime);
-      oscillator.frequency.exponentialRampToValueAtTime(
-        920,
-        context.currentTime + 0.12,
-      );
-      gain.gain.setValueAtTime(0.0001, context.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.12, context.currentTime + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.2);
-      oscillator.connect(gain).connect(context.destination);
-      oscillator.start();
-      oscillator.stop(context.currentTime + 0.22);
-    } catch {
-      // Browsers can block audio until the user grants notification permission.
-    }
-  }
-
-  function showDesktopNotification(
-    message: RealtimeMessageRow,
-    conversation?: InboxConversation,
-  ) {
-    if (
-      message.sender_type !== "customer" ||
-      !("Notification" in window) ||
-      Notification.permission !== "granted" ||
-      (document.visibilityState === "visible" &&
-        selectedConversationIdRef.current === message.conversation_id)
-    ) {
-      return;
-    }
-
-    const notification = new Notification(
-      conversation?.customer.name ?? "New customer message",
-      {
-        body: message.body,
-        tag: `techspd-conversation-${message.conversation_id}`,
-      },
-    );
-    notification.onclick = () => {
-      window.focus();
-      openConversation(message.conversation_id);
-      notification.close();
-    };
-  }
-
-  function notifyCustomerMessage(
-    message: RealtimeMessageRow,
-    conversation?: InboxConversation,
-  ) {
-    playNotificationSound();
-    showDesktopNotification(message, conversation);
-  }
-
-  async function requestNotificationPermission() {
-    if (!("Notification" in window)) {
-      setNotificationPermission("unsupported");
-      return;
-    }
-
-    const permission = await Notification.requestPermission();
-    setNotificationPermission(permission);
-
-    if (permission === "granted") {
-      playNotificationSound();
-    }
-  }
-
-  function broadcastOwnerTyping(conversationId: string, isTyping: boolean) {
-    void realtimeChannelRef.current?.send({
-      event: "typing",
-      payload: {
-        actor: "owner",
-        companyId,
-        conversationId,
-        isTyping,
-      } satisfies TypingPayload,
-      type: "broadcast",
-    });
   }
 
   function openConversation(conversationId: string) {
@@ -610,48 +212,6 @@ export function InboxModule({
         );
       },
     );
-  }
-
-  function upsertConversation(conversation: InboxConversation) {
-    setSnapshot((current) => {
-      const currentConversation = current.conversations.find(
-        (item) => item.id === conversation.id,
-      );
-      const isOpen = selectedConversationIdRef.current === conversation.id;
-      const unread =
-        currentConversation && !isOpen
-          ? Math.max(currentConversation.unread, conversation.unread)
-          : isOpen
-            ? 0
-            : conversation.unread;
-      const withoutConversation = current.conversations.filter(
-        (item) => item.id !== conversation.id,
-      );
-
-      return {
-        ...current,
-        conversations: [
-          {
-            ...(currentConversation ?? conversation),
-            ...conversation,
-            lastMessage:
-              conversation.lastMessage === "No messages yet" && currentConversation
-                ? currentConversation.lastMessage
-                : conversation.lastMessage,
-            time:
-              conversation.time === "--" && currentConversation
-                ? currentConversation.time
-                : conversation.time,
-            unread,
-          },
-          ...withoutConversation,
-        ],
-        selectedConversationId:
-          current.selectedConversationId ?? conversation.id,
-      };
-    });
-
-    setSelectedConversationId((current) => current ?? conversation.id);
   }
 
   async function updateCustomerAiEnabled(
@@ -750,8 +310,6 @@ export function InboxModule({
     <section className="grid min-h-[calc(100vh-172px)] gap-4 xl:grid-cols-[320px_minmax(0,1fr)_340px]">
       <ConversationList
         conversations={snapshot.conversations}
-        notificationPermission={notificationPermission}
-        onEnableNotifications={requestNotificationPermission}
         onSelect={openConversation}
         realtimeStatus={realtimeStatus}
         selectedConversationId={selectedConversation?.id ?? null}
@@ -759,9 +317,6 @@ export function InboxModule({
       <ChatPanel
         conversation={selectedConversation}
         messages={snapshot.messages}
-        isCustomerTyping={
-          selectedConversation ? typingByConversation[selectedConversation.id] : false
-        }
         onMessageFailed={failOptimisticMessage}
         onMessagePending={addOptimisticMessage}
         onMessageSent={(optimisticId, persistedId) => {
@@ -769,7 +324,6 @@ export function InboxModule({
           setSendError(null);
         }}
         onSendError={setSendError}
-        onTypingChange={broadcastOwnerTyping}
         sendError={sendError}
       />
       <CustomerPanel
@@ -782,15 +336,11 @@ export function InboxModule({
 
 function ConversationList({
   conversations,
-  notificationPermission,
-  onEnableNotifications,
   onSelect,
   realtimeStatus,
   selectedConversationId,
 }: {
   conversations: InboxConversation[];
-  notificationPermission: NotificationPermissionState;
-  onEnableNotifications: () => Promise<void>;
   onSelect: (conversationId: string) => void;
   realtimeStatus: RealtimeStatus;
   selectedConversationId: string | null;
@@ -844,30 +394,6 @@ function ConversationList({
         </div>
 
         <div className="flex-1 space-y-2 overflow-y-auto p-3">
-          {notificationPermission === "default" ? (
-            <div className="mb-3 flex items-start gap-3 rounded-lg border border-[#bfdbfe] bg-[#eff6ff] p-3 text-[#1e3a8a]">
-              <Bell className="mt-0.5 size-4 shrink-0" />
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-semibold">Never miss a reply</p>
-                <p className="mt-1 text-xs leading-5 text-[#1e40af]">
-                  Enable desktop alerts and a short sound for new customer messages.
-                </p>
-              </div>
-              <Button
-                className="shrink-0"
-                onClick={() => void onEnableNotifications()}
-                size="sm"
-                type="button"
-                variant="outline"
-              >
-                Enable
-              </Button>
-            </div>
-          ) : notificationPermission === "denied" ? (
-            <p className="mb-3 rounded-lg border bg-secondary/60 px-3 py-2 text-xs text-muted-foreground">
-              Desktop notifications are blocked in your browser settings.
-            </p>
-          ) : null}
           {conversations.length > 0 ? (
             conversations.map((conversation) => (
               <ConversationCard
@@ -940,57 +466,31 @@ function ConversationCard({
 
 function ChatPanel({
   conversation,
-  isCustomerTyping,
   messages,
   onMessageFailed,
   onMessagePending,
   onMessageSent,
   onSendError,
-  onTypingChange,
   sendError,
 }: {
   conversation: InboxConversation | null;
-  isCustomerTyping: boolean;
   messages: InboxMessage[];
   onMessageFailed: (optimisticId: string) => void;
   onMessagePending: (conversationId: string, message: InboxMessage) => void;
   onMessageSent: (optimisticId: string, persistedId: string) => void;
   onSendError: (message: string | null) => void;
-  onTypingChange: (conversationId: string, isTyping: boolean) => void;
   sendError: string | null;
 }) {
   const [draft, setDraft] = useState("");
   const [isSending, setIsSending] = useState(false);
-  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const messagesViewportRef = useRef<HTMLDivElement | null>(null);
-  const isNearBottomRef = useRef(true);
-  const previousConversationIdRef = useRef<string | null>(null);
-  const typingStopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    const conversationChanged = previousConversationIdRef.current !== conversation?.id;
-    previousConversationIdRef.current = conversation?.id ?? null;
-
-    if (conversationChanged || isNearBottomRef.current) {
-      messagesEndRef.current?.scrollIntoView({
-        behavior: conversationChanged ? "auto" : "smooth",
-        block: "end",
-      });
-      isNearBottomRef.current = true;
-      setShowJumpToLatest(false);
-    } else if (messages.length > 0) {
-      setShowJumpToLatest(true);
-    }
+    messagesEndRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "end",
+    });
   }, [conversation?.id, messages.length]);
-
-  useEffect(() => {
-    return () => {
-      if (typingStopTimeoutRef.current) {
-        clearTimeout(typingStopTimeoutRef.current);
-      }
-    };
-  }, []);
 
   if (!conversation) {
     return (
@@ -1024,7 +524,6 @@ function ChatPanel({
     const optimisticId = `optimistic-${crypto.randomUUID()}`;
 
     setDraft("");
-    onTypingChange(conversation.id, false);
     onMessagePending(conversation.id, {
       body: messageBody,
       id: optimisticId,
@@ -1108,19 +607,7 @@ function ChatPanel({
           ) : null}
         </div>
 
-        <div
-          className="relative flex-1 space-y-4 overflow-y-auto bg-secondary/30 p-4"
-          onScroll={(event) => {
-            const viewport = event.currentTarget;
-            const distanceFromBottom =
-              viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
-            isNearBottomRef.current = distanceFromBottom < 120;
-            if (isNearBottomRef.current) {
-              setShowJumpToLatest(false);
-            }
-          }}
-          ref={messagesViewportRef}
-        >
+        <div className="flex-1 space-y-4 overflow-y-auto bg-secondary/30 p-4">
           {messages.length > 0 ? (
             messages.map((message) => (
               <ChatBubble message={message} key={message.id} />
@@ -1130,38 +617,7 @@ function ChatPanel({
               No messages yet for this customer.
             </div>
           )}
-          {isCustomerTyping ? (
-            <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-              <span className="flex gap-1" aria-hidden="true">
-                {[0, 1, 2].map((dot) => (
-                  <span
-                    className="size-1.5 animate-pulse rounded-full bg-muted-foreground"
-                    key={dot}
-                    style={{ animationDelay: `${dot * 140}ms` }}
-                  />
-                ))}
-              </span>
-              Customer is typing
-            </div>
-          ) : null}
           <div ref={messagesEndRef} />
-          {showJumpToLatest ? (
-            <Button
-              aria-label="Jump to latest message"
-              className="sticky bottom-0 left-1/2 -translate-x-1/2 shadow-md"
-              onClick={() => {
-                messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-                isNearBottomRef.current = true;
-                setShowJumpToLatest(false);
-              }}
-              size="sm"
-              type="button"
-              variant="secondary"
-            >
-              <ArrowDown className="size-4" />
-              Latest
-            </Button>
-          ) : null}
         </div>
 
         <div className="border-t bg-card p-4">
@@ -1202,19 +658,7 @@ function ChatPanel({
               className="min-h-10 flex-1 resize-none rounded-lg border bg-background px-3 py-2 text-sm shadow-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
               id="message-composer"
               name="messageComposer"
-              onChange={(event) => {
-                const nextDraft = event.target.value;
-                setDraft(nextDraft);
-                onTypingChange(conversation.id, nextDraft.trim().length > 0);
-
-                if (typingStopTimeoutRef.current) {
-                  clearTimeout(typingStopTimeoutRef.current);
-                }
-                typingStopTimeoutRef.current = setTimeout(
-                  () => onTypingChange(conversation.id, false),
-                  1_200,
-                );
-              }}
+              onChange={(event) => setDraft(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
@@ -1573,50 +1017,6 @@ function CustomerAvatar({
   );
 }
 
-async function fetchConversationPreview({
-  companyId,
-  conversationId,
-  latestMessage,
-}: {
-  companyId: string;
-  conversationId: string;
-  latestMessage: RealtimeMessageRow | null;
-}) {
-  const supabase = createClient();
-  const { data, error } = await supabase
-    .from("conversations")
-    .select(
-      "id, company_id, customer_id, channel_id, last_message_at, last_read_at, unread_count, updated_at, customers(name,avatar_url,email,phone,location,platform,ai_enabled,lead_stage,metadata), channels(name,type)",
-    )
-    .eq("company_id", companyId)
-    .eq("id", conversationId)
-    .single();
-
-  if (error || !data) {
-    return null;
-  }
-
-  let resolvedLatestMessage = latestMessage;
-
-  if (!resolvedLatestMessage) {
-    const { data: messageData } = await supabase
-      .from("messages")
-      .select("id, company_id, conversation_id, sender_type, body, sent_at")
-      .eq("company_id", companyId)
-      .eq("conversation_id", conversationId)
-      .order("sent_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    resolvedLatestMessage = (messageData as RealtimeMessageRow | null) ?? null;
-  }
-
-  return mapRealtimeConversation(
-    data as ClientConversationRow,
-    resolvedLatestMessage,
-  );
-}
-
 async function fetchConversationMessages({
   companyId,
   conversationId,
@@ -1634,44 +1034,6 @@ async function fetchConversationMessages({
     .limit(100);
 
   return ((data ?? []) as RealtimeMessageRow[]).map(mapRealtimeMessage);
-}
-
-function mapRealtimeConversation(
-  conversation: ClientConversationRow,
-  latestMessage: RealtimeMessageRow | null,
-): InboxConversation {
-  const customer = Array.isArray(conversation.customers)
-    ? conversation.customers[0]
-    : conversation.customers;
-  const channel = Array.isArray(conversation.channels)
-    ? conversation.channels[0]
-    : conversation.channels;
-  const platform = platformLabel(
-    customer?.platform ?? channel?.name ?? channel?.type,
-  );
-  const name = customer?.name ?? "Unknown customer";
-
-  return {
-    aiEnabled: customer?.ai_enabled ?? true,
-    avatar: initials(name),
-    avatarUrl: customer?.avatar_url ?? null,
-    customer: {
-      email: customer?.email ?? "No email yet",
-      id: conversation.customer_id,
-      location: customer?.location ?? "Location unavailable",
-      name,
-      notes: metadataNotes(customer?.metadata),
-      phone: customer?.phone ?? "No phone yet",
-      tags: [platform],
-    },
-    id: conversation.id,
-    lastMessage: latestMessage?.body ?? "No messages yet",
-    lastReadAt: conversation.last_read_at,
-    leadStage: formatLeadStage(customer?.lead_stage ?? "new"),
-    platform,
-    time: relativeTime(latestMessage?.sent_at ?? conversation.last_message_at),
-    unread: conversation.unread_count,
-  };
 }
 
 function mapRealtimeMessage(message: RealtimeMessageRow): InboxMessage {
@@ -1706,89 +1068,6 @@ function moveConversationToTop(
     conversation,
     ...conversations.filter((item) => item.id !== conversationId),
   ];
-}
-
-function mergeMessages(
-  persistedMessages: InboxMessage[],
-  localMessages: InboxMessage[],
-) {
-  const messagesById = new Map(
-    persistedMessages.map((message) => [message.id, message]),
-  );
-
-  for (const message of localMessages) {
-    messagesById.set(message.id, message);
-  }
-
-  return Array.from(messagesById.values());
-}
-
-function platformLabel(value?: string | null) {
-  const normalized = (value ?? "unknown").toLowerCase();
-
-  if (normalized.includes("facebook")) {
-    return "Facebook";
-  }
-
-  if (normalized.includes("instagram")) {
-    return "Instagram";
-  }
-
-  if (normalized.includes("tiktok") || normalized.includes("tik tok")) {
-    return "TikTok";
-  }
-
-  return "Unknown";
-}
-
-function formatLeadStage(value: string) {
-  return value
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-
-function initials(name: string) {
-  return name
-    .split(" ")
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join("");
-}
-
-function metadataNotes(metadata: Record<string, unknown> | null | undefined) {
-  const note = metadata?.notes ?? metadata?.conversion_notes;
-
-  if (typeof note === "string" && note.trim()) {
-    return [note];
-  }
-
-  return ["No notes yet."];
-}
-
-function relativeTime(value?: string | null) {
-  if (!value) {
-    return "--";
-  }
-
-  const diff = Date.now() - new Date(value).getTime();
-  const minutes = Math.max(Math.floor(diff / 60000), 0);
-
-  if (minutes < 1) {
-    return "now";
-  }
-
-  if (minutes < 60) {
-    return `${minutes}m`;
-  }
-
-  const hours = Math.floor(minutes / 60);
-
-  if (hours < 24) {
-    return `${hours}h`;
-  }
-
-  return `${Math.floor(hours / 24)}d`;
 }
 
 function RealtimeBadge({ status }: { status: RealtimeStatus }) {

@@ -24,23 +24,24 @@ const checks = [
   {
     file: "src/components/inbox/inbox-module.tsx",
     patterns: [
-      "Notification.requestPermission()",
-      "new Notification(",
-      "playNotificationSound",
-      "markConversationRead",
-      "unread_count: 0",
-      '.on("broadcast", { event: "typing" }',
-      'event: "typing"',
-      "Customer is typing",
+      'event: "INSERT"',
+      'table: "messages"',
+      "refreshInboxSnapshot",
+      "setSnapshot(refreshed)",
+      "[TechSpd Realtime] realtime subscribed",
+      "[TechSpd Realtime] message insert received",
+      "[TechSpd Realtime] snapshot refreshed",
+      "[TechSpd Realtime] realtime error",
+      ".subscribe((status, error) =>",
       'status: "sending"',
       'status: "failed"',
+    ],
+    absent: [
+      '.on("broadcast"',
+      "Notification.requestPermission()",
+      "markConversationRead",
       "isNearBottomRef",
-      "distanceFromBottom < 120",
       "Jump to latest message",
-      "refreshSnapshotAfterRealtimeEvent",
-      "mergeMessages",
-      "snapshotRefreshSequenceRef",
-      "stale snapshot fallback ignored",
     ],
   },
 ];
@@ -57,6 +58,12 @@ for (const check of checks) {
   for (const pattern of check.patterns) {
     if (!source.includes(pattern)) {
       failures.push(`${check.file} is missing: ${pattern}`);
+    }
+  }
+
+  for (const pattern of check.absent ?? []) {
+    if (source.includes(pattern)) {
+      failures.push(`${check.file} should not contain: ${pattern}`);
     }
   }
 }

@@ -119,8 +119,11 @@ assert(
 );
 for (const pattern of ["avatarUrl", "customers(name,avatar_url"]) {
   assert(inboxData.includes(pattern), `Inbox data missing customer photo: ${pattern}`);
-  assert(inboxModule.includes(pattern), `Inbox UI missing customer photo: ${pattern}`);
 }
+assert(
+  inboxModule.includes("conversation.avatarUrl"),
+  "Inbox UI must consume the customer photo from the snapshot.",
+);
 assert(
   inboxModule.includes("<CustomerAvatar conversation={conversation}"),
   "Inbox must render the customer profile photo.",
