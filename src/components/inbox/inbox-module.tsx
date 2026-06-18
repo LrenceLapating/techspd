@@ -101,69 +101,156 @@ export function InboxModule({
 
     const supabase = createClient();
     const channelName = `company-${companyId}-inbox`;
-    let channel: RealtimeChannel | null = supabase
-      .channel(channelName)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "messages",
-        },
-        (payload) => {
-          const message = payload.new as RealtimeMessageRow;
+    let isActive = true;
+    let channel: RealtimeChannel | null = null;
 
-          console.info("[TechSpd Realtime] messages INSERT", {
-            companyId: message.company_id,
-            conversationId: message.conversation_id,
-            messageId: message.id,
-            senderType: message.sender_type,
-          });
-          void refreshInboxSnapshot("messages INSERT");
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "conversations",
-        },
-        (payload) => {
-          console.info("[TechSpd Realtime] conversations UPDATE", {
-            conversationId: (payload.new as { id?: string }).id,
-          });
-          void refreshInboxSnapshot("conversations UPDATE");
-        },
-      )
-      .subscribe((status, error) => {
-        if (status === "SUBSCRIBED") {
-          console.info("[TechSpd Realtime] SUBSCRIBED", {
-            channel: channelName,
-            companyId,
-          });
-          setRealtimeStatus("connected");
-          return;
-        }
+    async function subscribeToInbox() {
+      setRealtimeStatus("connecting");
 
-        if (
-          status === "CHANNEL_ERROR" ||
-          status === "TIMED_OUT" ||
-          status === "CLOSED"
-        ) {
-          console.error(`[TechSpd Realtime] ${status}`, {
-            companyId,
-            error,
-            status,
-          });
-          setRealtimeStatus("error");
-          return;
-        }
+      const [sessionResult, userResult] = await Promise.all([
+        supabase.auth.getSession(),
+        supabase.auth.getUser(),
+      ]);
+      const session = sessionResult.data.session;
+      const user = userResult.data.user;
+      const { data: profile, error: profileError } = user
+        ? await supabase
+            .from("users")
+            .select("company_id")
+            .eq("id", user.id)
+            .maybeSingle()
+        : { data: null, error: null };
+      const profileCompanyId = (profile as { company_id?: string } | null)
+        ?.company_id;
 
-        setRealtimeStatus("connecting");
+      console.info("[TechSpd Realtime] auth diagnostics", {
+        companyId,
+        currentUserId: user?.id ?? null,
+        profileCompanyId: profileCompanyId ?? null,
+        realtimeAuthSessionExists: Boolean(session?.access_token),
+        sessionError: sessionResult.error?.message ?? null,
+        userError: userResult.error?.message ?? null,
+        profileError: profileError?.message ?? null,
+        companyMatches: profileCompanyId === companyId,
       });
 
+      if (!isActive) {
+        return;
+      }
+
+      if (!session?.access_token || !user) {
+        console.error("[TechSpd Realtime] authenticated session missing", {
+          companyId,
+          currentUserId: user?.id ?? null,
+          realtimeAuthSessionExists: false,
+        });
+        setRealtimeStatus("error");
+        return;
+      }
+
+      if (profileError || profileCompanyId !== companyId) {
+        console.error("[TechSpd Realtime] company membership mismatch", {
+          companyId,
+          currentUserId: user.id,
+          profileCompanyId: profileCompanyId ?? null,
+        });
+        setRealtimeStatus("error");
+        return;
+      }
+
+      await supabase.realtime.setAuth(session.access_token);
+
+      if (!isActive) {
+        return;
+      }
+
+      channel = supabase
+        .channel(channelName)
+        .on(
+          "postgres_changes",
+          {
+            event: "INSERT",
+            schema: "public",
+            table: "messages",
+          },
+          (payload) => {
+            const message = payload.new as RealtimeMessageRow;
+
+            console.info("[TechSpd Realtime] messages INSERT payload", payload);
+            console.info("[TechSpd Realtime] inserted message diagnostics", {
+              companyId: message.company_id,
+              conversationId: message.conversation_id,
+              messageId: message.id,
+              senderType: message.sender_type,
+            });
+            void refreshInboxSnapshot("messages INSERT");
+          },
+        )
+        .on(
+          "postgres_changes",
+          {
+            event: "UPDATE",
+            schema: "public",
+            table: "conversations",
+          },
+          (payload) => {
+            console.info(
+              "[TechSpd Realtime] conversations UPDATE payload",
+              payload,
+            );
+            void refreshInboxSnapshot("conversations UPDATE");
+          },
+        )
+        .subscribe((status, error) => {
+          console.info("[TechSpd Realtime] subscription status", {
+            channel: channelName,
+            companyId,
+            status,
+          });
+
+          if (status === "SUBSCRIBED") {
+            console.info("[TechSpd Realtime] SUBSCRIBED", {
+              channel: channelName,
+              companyId,
+              currentUserId: user.id,
+              realtimeAuthSessionExists: true,
+            });
+            setRealtimeStatus("connected");
+            return;
+          }
+
+          if (
+            status === "CHANNEL_ERROR" ||
+            status === "TIMED_OUT" ||
+            status === "CLOSED"
+          ) {
+            console.error(`[TechSpd Realtime] ${status}`, {
+              companyId,
+              error,
+              status,
+            });
+            setRealtimeStatus("error");
+            return;
+          }
+
+          setRealtimeStatus("connecting");
+        });
+    }
+
+    void subscribeToInbox().catch((error) => {
+      if (!isActive) {
+        return;
+      }
+
+      console.error("[TechSpd Realtime] subscription setup failed", {
+        companyId,
+        error,
+      });
+      setRealtimeStatus("error");
+    });
+
     return () => {
+      isActive = false;
       if (channel) {
         void supabase.removeChannel(channel);
         channel = null;
