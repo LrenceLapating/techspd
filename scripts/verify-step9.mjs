@@ -25,7 +25,7 @@ const checks = [
       "applyRealtimeMessage",
       "fetchConversationPreview",
       "fetchConversationMessages",
-      "scrollIntoView",
+      "isNearBottomRef",
       "setSelectedConversationId",
     ],
     absent: [

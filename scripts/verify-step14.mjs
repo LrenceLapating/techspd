@@ -86,7 +86,7 @@ for (const pattern of [
   "message: messageBody",
   "addOptimisticMessage",
   "confirmOptimisticMessage",
-  "removeOptimisticMessage",
+  "failOptimisticMessage",
   "onMessageSent",
   "sendError",
   "isSending",

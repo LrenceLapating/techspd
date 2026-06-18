@@ -17,6 +17,7 @@ export type InboxConversation = {
   };
   id: string;
   lastMessage: string;
+  lastReadAt: string | null;
   leadStage: string;
   platform: "Facebook" | "Instagram" | "TikTok" | "Unknown";
   time: string;
@@ -27,6 +28,7 @@ export type InboxMessage = {
   body: string;
   id: string;
   sender: "customer" | "ai" | "owner";
+  status?: "sending" | "sent" | "failed";
   time: string;
 };
 
@@ -75,6 +77,8 @@ type ConversationRow = {
     | null;
   id: string;
   last_message_at: string | null;
+  last_read_at: string | null;
+  unread_count: number;
   updated_at: string;
 };
 
@@ -100,7 +104,7 @@ export async function getInboxSnapshot({
   const { data: conversationsData, error: conversationsError } = await supabase
     .from("conversations")
     .select(
-      "id, customer_id, channel_id, last_message_at, updated_at, customers(name,avatar_url,email,phone,location,platform,ai_enabled,lead_stage,metadata), channels(name,type)",
+      "id, customer_id, channel_id, last_message_at, last_read_at, unread_count, updated_at, customers(name,avatar_url,email,phone,location,platform,ai_enabled,lead_stage,metadata), channels(name,type)",
     )
     .eq("company_id", companyId)
     .order("last_message_at", { ascending: false, nullsFirst: false })
@@ -213,10 +217,11 @@ function mapConversation(
     },
     id: conversation.id,
     lastMessage: latestMessage?.body ?? "No messages yet",
+    lastReadAt: conversation.last_read_at,
     leadStage: formatLeadStage(customer?.lead_stage ?? "new"),
     platform,
     time: relativeTime(latestMessage?.sent_at ?? conversation.last_message_at),
-    unread: latestMessage?.sender_type === "customer" ? 1 : 0,
+    unread: conversation.unread_count,
   };
 }
 
@@ -230,6 +235,7 @@ function mapMessage(message: MessageRow): InboxMessage {
         : message.sender_type === "agent" || message.sender_type === "owner"
           ? "owner"
           : "ai",
+    status: message.sender_type === "customer" ? undefined : "sent",
     time: new Intl.DateTimeFormat("en", {
       hour: "numeric",
       minute: "2-digit",

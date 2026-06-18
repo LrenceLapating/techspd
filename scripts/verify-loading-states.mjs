@@ -65,7 +65,7 @@ const checks = [
       "Send Message",
       "addOptimisticMessage",
       "confirmOptimisticMessage",
-      "removeOptimisticMessage",
+      "failOptimisticMessage",
       "optimistic-${crypto.randomUUID()}",
     ],
   },
