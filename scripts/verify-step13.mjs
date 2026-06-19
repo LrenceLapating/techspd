@@ -45,6 +45,13 @@ for (const pattern of [
   "parseMetaWebhookEvents",
   "ingestMetaWebhookMessage",
   "received: true",
+  "ignoredEvents",
+  "body_object",
+  "entry_id",
+  "entry_keys",
+  "messaging_keys",
+  "changes_keys",
+  "reason_ignored",
 ]) {
   assert(route.includes(pattern), `Meta webhook route missing: ${pattern}`);
 }
@@ -66,6 +73,13 @@ for (const pattern of [
   "pageId",
   "instagramId",
   "platformUserId === recipientId",
+  "entry_has_changes_but_no_messaging",
+  "entry_has_no_messaging",
+  "metaChannelIdentifiers",
+  '.in("channels.channel_id", channelIdentifiers)',
+  '.in("channel_id", channelIdentifiers)',
+  '.in("external_id", channelIdentifiers)',
+  'platform === "instagram" ? (entryId ?? recipientId) : recipientId',
 ]) {
   assert(webhook.includes(pattern), `Meta parser missing: ${pattern}`);
 }
@@ -73,8 +87,6 @@ for (const pattern of [
 for (const operation of [
   ".from(\"channels\")",
   ".eq(\"platform\", event.platform)",
-  ".eq(\"channel_id\", event.channelId)",
-  ".eq(\"external_id\", event.channelId)",
   ".eq(\"is_connected\", true)",
   ".from(\"customers\")",
   "`${event.platform}:${event.platformUserId}`",

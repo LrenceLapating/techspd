@@ -65,14 +65,29 @@ export async function POST(request: Request) {
     });
   }
 
-  const { events, ignored } = parseMetaWebhookEvents(body);
+  const { events, ignored, ignoredEvents } = parseMetaWebhookEvents(body);
   let processed = 0;
   let failed = 0;
 
   console.info("[meta-webhook] Received payload.", {
+    object:
+      body && typeof body === "object" && "object" in body
+        ? body.object
+        : null,
     events: events.length,
     ignored,
   });
+
+  for (const ignoredEvent of ignoredEvents) {
+    console.warn("[meta-webhook] Ignored event.", {
+      body_object: ignoredEvent.bodyObject,
+      changes_keys: ignoredEvent.changesKeys,
+      entry_id: ignoredEvent.entryId,
+      entry_keys: ignoredEvent.entryKeys,
+      messaging_keys: ignoredEvent.messagingKeys,
+      reason_ignored: ignoredEvent.reason,
+    });
+  }
 
   for (const event of events) {
     try {

@@ -11,6 +11,7 @@ export type MetaWebhookAttachment = {
 export type MetaWebhookMessageEvent = {
   attachments: MetaWebhookAttachment[];
   channelId: string;
+  entryId: string | null;
   instagramId: string | null;
   messageId: string | null;
   pageId: string | null;
@@ -24,6 +25,16 @@ export type MetaWebhookMessageEvent = {
 export type MetaWebhookParseResult = {
   events: MetaWebhookMessageEvent[];
   ignored: number;
+  ignoredEvents: MetaWebhookIgnoredEvent[];
+};
+
+export type MetaWebhookIgnoredEvent = {
+  bodyObject: string | null;
+  changesKeys: string[];
+  entryId: string | null;
+  entryKeys: string[];
+  messagingKeys: string[];
+  reason: string;
 };
 
 type ChannelRow = {
@@ -85,29 +96,78 @@ export type MetaWebhookIngestionResult = {
 
 export function parseMetaWebhookEvents(body: unknown): MetaWebhookParseResult {
   if (!isRecord(body)) {
-    return { events: [], ignored: 1 };
+    return {
+      events: [],
+      ignored: 1,
+      ignoredEvents: [ignoredEvent({ reason: "body_is_not_an_object" })],
+    };
   }
 
-  const platform = platformFromObject(optionalString(body.object));
+  const bodyObject = optionalString(body.object);
+  const platform = platformFromObject(bodyObject);
   const entries = Array.isArray(body.entry) ? body.entry : [];
   const events: MetaWebhookMessageEvent[] = [];
+  const ignoredEvents: MetaWebhookIgnoredEvent[] = [];
   let ignored = 0;
 
-  if (!platform || entries.length === 0) {
-    return { events, ignored: 1 };
+  if (!platform) {
+    return {
+      events,
+      ignored: 1,
+      ignoredEvents: [
+        ignoredEvent({
+          bodyObject,
+          reason: `unsupported_object:${bodyObject ?? "missing"}`,
+        }),
+      ],
+    };
+  }
+
+  if (entries.length === 0) {
+    return {
+      events,
+      ignored: 1,
+      ignoredEvents: [ignoredEvent({ bodyObject, reason: "entry_is_missing" })],
+    };
   }
 
   for (const entry of entries) {
     if (!isRecord(entry)) {
       ignored += 1;
+      ignoredEvents.push(
+        ignoredEvent({ bodyObject, reason: "entry_is_not_an_object" }),
+      );
       continue;
     }
 
     const entryId = optionalString(entry.id);
+    const entryKeys = Object.keys(entry).sort();
+    const hasChanges = Object.prototype.hasOwnProperty.call(entry, "changes");
+    const changesKeys = nestedRecordKeys(entry.changes);
     const fallbackTimestamp = timestampFromValue(entry.time);
     const messagingEvents = Array.isArray(entry.messaging) ? entry.messaging : [];
 
+    if (messagingEvents.length === 0) {
+      ignored += 1;
+      ignoredEvents.push(
+        ignoredEvent({
+          bodyObject,
+          changesKeys,
+          entryId,
+          entryKeys,
+          reason:
+            hasChanges
+              ? "entry_has_changes_but_no_messaging"
+              : "entry_has_no_messaging",
+        }),
+      );
+      continue;
+    }
+
     for (const messagingEvent of messagingEvents) {
+      const messagingKeys = isRecord(messagingEvent)
+        ? Object.keys(messagingEvent).sort()
+        : [];
       const parsed = parseMessagingEvent({
         entryId,
         fallbackTimestamp,
@@ -115,15 +175,25 @@ export function parseMetaWebhookEvents(body: unknown): MetaWebhookParseResult {
         platform,
       });
 
-      if (parsed) {
-        events.push(parsed);
+      if (parsed.event) {
+        events.push(parsed.event);
       } else {
         ignored += 1;
+        ignoredEvents.push(
+          ignoredEvent({
+            bodyObject,
+            changesKeys,
+            entryId,
+            entryKeys,
+            messagingKeys,
+            reason: parsed.reason,
+          }),
+        );
       }
     }
   }
 
-  return { events, ignored };
+  return { events, ignored, ignoredEvents };
 }
 
 export async function ingestMetaWebhookMessage(
@@ -257,13 +327,14 @@ async function findExistingMessageContext(
   customerExternalId: string,
 ) {
   const supabase = createAdminClient();
+  const channelIdentifiers = metaChannelIdentifiers(event);
   const { data, error } = await supabase
     .from("conversations")
     .select(
       "id, company_id, customer_id, channel_id, channels!inner(id,company_id,platform,channel_id,channel_name,external_id,access_token,is_connected), customers!inner(id,ai_enabled,name,avatar_url,external_id)",
     )
     .eq("channels.platform", event.platform)
-    .eq("channels.channel_id", event.channelId)
+    .in("channels.channel_id", channelIdentifiers)
     .eq("channels.is_connected", true)
     .eq("customers.external_id", customerExternalId)
     .in("status", ["open", "pending"])
@@ -298,6 +369,7 @@ async function findExistingMessageContext(
 
 async function findConnectedChannel(event: MetaWebhookMessageEvent) {
   const supabase = createAdminClient();
+  const channelIdentifiers = metaChannelIdentifiers(event);
 
   const { data: byChannelId, error: channelIdError } = await supabase
     .from("channels")
@@ -305,8 +377,9 @@ async function findConnectedChannel(event: MetaWebhookMessageEvent) {
       "id, company_id, platform, channel_id, channel_name, external_id, access_token",
     )
     .eq("platform", event.platform)
-    .eq("channel_id", event.channelId)
+    .in("channel_id", channelIdentifiers)
     .eq("is_connected", true)
+    .limit(1)
     .maybeSingle();
 
   if (channelIdError) {
@@ -323,8 +396,9 @@ async function findConnectedChannel(event: MetaWebhookMessageEvent) {
       "id, company_id, platform, channel_id, channel_name, external_id, access_token",
     )
     .eq("platform", event.platform)
-    .eq("external_id", event.channelId)
+    .in("external_id", channelIdentifiers)
     .eq("is_connected", true)
+    .limit(1)
     .maybeSingle();
 
   if (externalIdError) {
@@ -336,7 +410,7 @@ async function findConnectedChannel(event: MetaWebhookMessageEvent) {
   }
 
   throw new Error(
-    `No connected ${event.platform} channel found for ${event.channelId}.`,
+    `No connected ${event.platform} channel found for ${channelIdentifiers.join(" or ")}.`,
   );
 }
 
@@ -536,7 +610,7 @@ function parseMessagingEvent({
   platform: MetaWebhookPlatform;
 }) {
   if (!isRecord(messagingEvent)) {
-    return null;
+    return { event: null, reason: "messaging_event_is_not_an_object" } as const;
   }
 
   const sender = isRecord(messagingEvent.sender) ? messagingEvent.sender : null;
@@ -548,33 +622,96 @@ function parseMessagingEvent({
   const recipientId = optionalString(recipient?.id) ?? entryId;
   const isEcho = message?.is_echo === true;
 
-  if (!message || !platformUserId || !recipientId || isEcho) {
-    return null;
+  if (!message) {
+    return { event: null, reason: "message_is_missing" } as const;
+  }
+
+  if (!platformUserId) {
+    return { event: null, reason: "sender_id_is_missing" } as const;
+  }
+
+  if (!recipientId) {
+    return { event: null, reason: "recipient_id_is_missing" } as const;
+  }
+
+  if (isEcho) {
+    return { event: null, reason: "message_is_echo" } as const;
   }
 
   if (platformUserId === recipientId) {
-    return null;
+    return { event: null, reason: "sender_matches_recipient" } as const;
   }
 
   const text = optionalString(message.text);
   const attachments = parseAttachments(message.attachments);
 
   if (!text && attachments.length === 0) {
-    return null;
+    return { event: null, reason: "message_has_no_text_or_attachments" } as const;
   }
 
+  const channelId = platform === "instagram" ? (entryId ?? recipientId) : recipientId;
+
   return {
-    attachments,
-    channelId: recipientId,
-    instagramId: platform === "instagram" ? recipientId : null,
-    messageId: optionalString(message.mid),
-    pageId: platform === "facebook" ? recipientId : null,
-    platform,
-    platformUserId,
-    recipientId,
-    text,
-    timestamp: timestampFromValue(messagingEvent.timestamp, fallbackTimestamp),
-  } satisfies MetaWebhookMessageEvent;
+    event: {
+      attachments,
+      channelId,
+      entryId,
+      instagramId: platform === "instagram" ? channelId : null,
+      messageId: optionalString(message.mid),
+      pageId: platform === "facebook" ? channelId : null,
+      platform,
+      platformUserId,
+      recipientId,
+      text,
+      timestamp: timestampFromValue(messagingEvent.timestamp, fallbackTimestamp),
+    } satisfies MetaWebhookMessageEvent,
+    reason: null,
+  } as const;
+}
+
+function metaChannelIdentifiers(event: MetaWebhookMessageEvent) {
+  return Array.from(
+    new Set(
+      [event.channelId, event.entryId, event.recipientId].filter(
+        (value): value is string => Boolean(value),
+      ),
+    ),
+  );
+}
+
+function ignoredEvent({
+  bodyObject = null,
+  changesKeys = [],
+  entryId = null,
+  entryKeys = [],
+  messagingKeys = [],
+  reason,
+}: Partial<Omit<MetaWebhookIgnoredEvent, "reason">> & { reason: string }) {
+  return {
+    bodyObject,
+    changesKeys,
+    entryId,
+    entryKeys,
+    messagingKeys,
+    reason,
+  } satisfies MetaWebhookIgnoredEvent;
+}
+
+function nestedRecordKeys(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const keys = value.flatMap((item) => {
+    if (!isRecord(item)) {
+      return [];
+    }
+
+    const nestedValue = isRecord(item.value) ? Object.keys(item.value) : [];
+    return [...Object.keys(item), ...nestedValue];
+  });
+
+  return Array.from(new Set(keys)).sort();
 }
 
 function parseAttachments(value: unknown): MetaWebhookAttachment[] {
