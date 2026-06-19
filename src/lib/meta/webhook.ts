@@ -35,6 +35,7 @@ export type MetaWebhookIgnoredEvent = {
   entryId: string | null;
   entryKeys: string[];
   messageIsEcho: boolean | null;
+  messageId: string | null;
   messageText: string | null;
   messagingKeys: string[];
   recipientId: string | null;
@@ -208,160 +209,170 @@ export function parseMetaWebhookEvents(body: unknown): MetaWebhookParseResult {
 
 export async function ingestMetaWebhookMessage(
   event: MetaWebhookMessageEvent,
-  { webhookReceivedAt = new Date().toISOString() }: { webhookReceivedAt?: string } = {},
+  {
+    traceId = "untracked",
+    webhookReceivedAt = new Date().toISOString(),
+  }: { traceId?: string; webhookReceivedAt?: string } = {},
 ): Promise<MetaWebhookIngestionResult> {
   const supabase = createAdminClient();
   const body = event.text ?? "[Attachment]";
   const customerExternalId = `${event.platform}:${event.platformUserId}`;
   const contextLookupStartedAt = Date.now();
-  const existingContext = await findExistingMessageContext(
-    event,
-    customerExternalId,
-  );
+  let currentStage: MetaWebhookTraceStage = "existing_context_lookup";
   let channel: ChannelRow;
   let customer: CustomerRow;
   let conversation: ConversationRow;
 
-  if (existingContext) {
-    channel = existingContext.channel;
-    customer = existingContext.customer;
-    conversation = { id: existingContext.conversationId };
-  } else {
-    channel = await findConnectedChannel(event);
-    customer = await findOrCreateCustomer({
-      companyId: channel.company_id,
+  try {
+    const existingContext = await findExistingMessageContext(
       event,
-      externalId: customerExternalId,
+      customerExternalId,
+    );
+
+    if (existingContext) {
+      channel = existingContext.channel;
+      customer = existingContext.customer;
+      conversation = { id: existingContext.conversationId };
+      logMetaFlowTrace({ channel, event, result: "matched", stage: "channel_lookup", traceId });
+      logMetaFlowTrace({ channel, event, recordId: customer.id, result: "existing", stage: "customer_lookup", traceId });
+      logMetaFlowTrace({ channel, event, recordId: conversation.id, result: "existing", stage: "conversation_lookup", traceId });
+    } else {
+      currentStage = "channel_lookup";
+      channel = await findConnectedChannel(event);
+      logMetaFlowTrace({ channel, event, result: "matched", stage: currentStage, traceId });
+
+      currentStage = "customer_lookup";
+      customer = await findOrCreateCustomer({
+        companyId: channel.company_id,
+        event,
+        externalId: customerExternalId,
+      });
+      logMetaFlowTrace({ channel, event, recordId: customer.id, result: "resolved", stage: currentStage, traceId });
+
+      currentStage = "conversation_lookup";
+      conversation = await findOrCreateConversation({
+        body,
+        channel,
+        customerId: customer.id,
+        sentAt: event.timestamp,
+      });
+      logMetaFlowTrace({ channel, event, recordId: conversation.id, result: "resolved", stage: currentStage, traceId });
+    }
+
+    const contextLookupMs = Date.now() - contextLookupStartedAt;
+    currentStage = "message_insert";
+    const { data: message, error: messageError } = await supabase
+      .from("messages")
+      .insert({
+        body,
+        company_id: channel.company_id,
+        conversation_id: conversation.id,
+        customer_id: customer.id,
+        metadata: {
+          ai_reply_allowed: customer.ai_enabled,
+          attachments: event.attachments,
+          instagram_id: event.instagramId,
+          message_id: event.messageId,
+          page_id: event.pageId,
+          platform: event.platform,
+          platform_channel_id: event.channelId,
+          platform_user_id: event.platformUserId,
+          recipient_id: event.recipientId,
+          source: "meta_webhook",
+          webhook_received_at: webhookReceivedAt,
+        },
+        sender_type: "customer",
+        sent_at: event.timestamp,
+      })
+      .select("id, created_at")
+      .single();
+
+    if (messageError) {
+      throw new Error(messageError.message);
+    }
+
+    logMetaFlowTrace({ channel, event, recordId: message.id, result: "inserted", stage: "message_insert", traceId });
+
+    const databaseInsertedAt = message.created_at;
+    const webhookToDatabaseMs = Math.max(
+      0,
+      new Date(databaseInsertedAt).getTime() - new Date(webhookReceivedAt).getTime(),
+    );
+
+    console.info("[TechSpd Latency] message inserted", {
+      databaseInsertedAt,
+      contextLookupMs,
+      fastPath: Boolean(existingContext),
+      messageId: message.id,
+      trace_id: traceId,
+      webhookReceivedAt,
+      webhookToDatabaseMs,
     });
-    conversation = await findOrCreateConversation({
-      body,
-      channel,
-      customerId: customer.id,
-      sentAt: event.timestamp,
-    });
-  }
 
-  logMetaFlowTrace({
-    channel,
-    event,
-    result: "matched",
-    stage: "channel_lookup",
-  });
-  logMetaFlowTrace({
-    channel,
-    event,
-    recordId: customer.id,
-    result: existingContext ? "existing" : "resolved",
-    stage: "customer_lookup",
-  });
-  logMetaFlowTrace({
-    channel,
-    event,
-    recordId: conversation.id,
-    result: existingContext ? "existing" : "resolved",
-    stage: "conversation_lookup",
-  });
+    const profilePromise = fetchFacebookCustomerProfile({ channel, event }).then(
+      (profile) =>
+        profile
+          ? updateCustomerProfile({
+              companyId: channel.company_id,
+              customerId: customer.id,
+              profile,
+            })
+          : undefined,
+    );
 
-  const contextLookupMs = Date.now() - contextLookupStartedAt;
+    currentStage = "post_insert_updates";
+    await Promise.all([
+      supabase
+        .from("customers")
+        .update({ last_activity_at: event.timestamp, platform: event.platform })
+        .eq("id", customer.id)
+        .eq("company_id", channel.company_id),
+      supabase
+        .from("conversations")
+        .update({ last_message: body, last_message_at: event.timestamp, status: "open" })
+        .eq("id", conversation.id)
+        .eq("company_id", channel.company_id),
+      profilePromise,
+    ]);
 
-  const { data: message, error: messageError } = await supabase
-    .from("messages")
-    .insert({
-      body,
+    return {
+      channel_id: channel.id,
       company_id: channel.company_id,
       conversation_id: conversation.id,
       customer_id: customer.id,
-      metadata: {
-        ai_reply_allowed: customer.ai_enabled,
-        attachments: event.attachments,
-        instagram_id: event.instagramId,
-        message_id: event.messageId,
-        page_id: event.pageId,
-        platform: event.platform,
-        platform_channel_id: event.channelId,
-        platform_user_id: event.platformUserId,
-        recipient_id: event.recipientId,
-        source: "meta_webhook",
-        webhook_received_at: webhookReceivedAt,
-      },
-      sender_type: "customer",
-      sent_at: event.timestamp,
-    })
-    .select("id, created_at")
-    .single();
-
-  if (messageError) {
-    throw new Error(messageError.message);
+      database_inserted_at: databaseInsertedAt,
+      message_id: message.id,
+      matched_channel_id: channel.channel_id ?? channel.external_id ?? event.channelId,
+      webhook_received_at: webhookReceivedAt,
+      webhook_to_database_ms: webhookToDatabaseMs,
+    };
+  } catch (error) {
+    console.error("[meta-webhook] STOP.", {
+      body_object: event.platform === "instagram" ? "instagram" : "page",
+      channel_id_requested: event.channelId,
+      entry_id: event.entryId,
+      error,
+      execution_exit: currentStage,
+      message_id: event.messageId,
+      message_is_echo: event.messageIsEcho,
+      message_text: event.text,
+      platform_resolved: event.platform,
+      recipient_id: event.recipientId,
+      sender_id: event.platformUserId,
+      stop_reason: error instanceof Error ? error.message : "unknown_error",
+      trace_id: traceId,
+    });
+    throw error;
   }
-
-  logMetaFlowTrace({
-    channel,
-    event,
-    recordId: message.id,
-    result: "inserted",
-    stage: "message_insert",
-  });
-
-  const databaseInsertedAt = message.created_at;
-  const webhookToDatabaseMs = Math.max(
-    0,
-    new Date(databaseInsertedAt).getTime() - new Date(webhookReceivedAt).getTime(),
-  );
-
-  console.info("[TechSpd Latency] message inserted", {
-    databaseInsertedAt,
-    contextLookupMs,
-    fastPath: Boolean(existingContext),
-    messageId: message.id,
-    webhookReceivedAt,
-    webhookToDatabaseMs,
-  });
-
-  const profilePromise = fetchFacebookCustomerProfile({ channel, event }).then(
-    (profile) =>
-      profile
-        ? updateCustomerProfile({
-            companyId: channel.company_id,
-            customerId: customer.id,
-            profile,
-          })
-        : undefined,
-  );
-
-  await Promise.all([
-    supabase
-      .from("customers")
-      .update({
-        last_activity_at: event.timestamp,
-        platform: event.platform,
-      })
-      .eq("id", customer.id)
-      .eq("company_id", channel.company_id),
-    supabase
-      .from("conversations")
-      .update({
-        last_message: body,
-        last_message_at: event.timestamp,
-        status: "open",
-      })
-      .eq("id", conversation.id)
-      .eq("company_id", channel.company_id),
-    profilePromise,
-  ]);
-
-  return {
-    channel_id: channel.id,
-    company_id: channel.company_id,
-    conversation_id: conversation.id,
-    customer_id: customer.id,
-    database_inserted_at: databaseInsertedAt,
-    message_id: message.id,
-    matched_channel_id:
-      channel.channel_id ?? channel.external_id ?? event.channelId,
-    webhook_received_at: webhookReceivedAt,
-    webhook_to_database_ms: webhookToDatabaseMs,
-  };
 }
+
+type MetaWebhookTraceStage =
+  | "existing_context_lookup"
+  | "channel_lookup"
+  | "customer_lookup"
+  | "conversation_lookup"
+  | "message_insert"
+  | "post_insert_updates";
 
 function logMetaFlowTrace({
   channel,
@@ -369,16 +380,14 @@ function logMetaFlowTrace({
   recordId = null,
   result,
   stage,
+  traceId,
 }: {
   channel: ChannelRow;
   event: MetaWebhookMessageEvent;
   recordId?: string | null;
   result: "existing" | "inserted" | "matched" | "resolved";
-  stage:
-    | "channel_lookup"
-    | "conversation_lookup"
-    | "customer_lookup"
-    | "message_insert";
+  stage: Exclude<MetaWebhookTraceStage, "existing_context_lookup" | "post_insert_updates">;
+  traceId: string;
 }) {
   console.info("[meta-webhook] Flow trace.", {
     channel_id_matched: channel.channel_id ?? channel.external_id,
@@ -391,6 +400,7 @@ function logMetaFlowTrace({
     result,
     sender_id: event.platformUserId,
     stage,
+    trace_id: traceId,
   });
 }
 
@@ -692,10 +702,12 @@ function parseMessagingEvent({
   const message = isRecord(messagingEvent.message) ? messagingEvent.message : null;
   const platformUserId = optionalString(sender?.id);
   const recipientId = optionalString(recipient?.id) ?? entryId;
-  const messageIsEcho = message?.is_echo === true;
+    const messageIsEcho = message?.is_echo === true;
+  const messageId = message ? optionalString(message.mid) : null;
   const messageText = optionalString(message?.text);
   const messageDetails = {
     messageIsEcho,
+    messageId,
     messageText,
     recipientId,
     senderId: platformUserId,
@@ -740,7 +752,7 @@ function parseMessagingEvent({
       entryId,
       instagramId: platform === "instagram" ? channelId : null,
       messageIsEcho,
-      messageId: optionalString(message.mid),
+      messageId,
       pageId: platform === "facebook" ? channelId : null,
       platform,
       platformUserId,
@@ -757,11 +769,13 @@ function ignoredMessagingEvent(
   reason: string,
   details: {
     messageIsEcho: boolean;
+    messageId: string | null;
     messageText: string | null;
     recipientId: string | null;
     senderId: string | null;
   } = {
     messageIsEcho: false,
+    messageId: null,
     messageText: null,
     recipientId: null,
     senderId: null,
@@ -790,6 +804,7 @@ function ignoredEvent({
   entryId = null,
   entryKeys = [],
   messageIsEcho = null,
+  messageId = null,
   messageText = null,
   messagingKeys = [],
   recipientId = null,
@@ -802,6 +817,7 @@ function ignoredEvent({
     entryId,
     entryKeys,
     messageIsEcho,
+    messageId,
     messageText,
     messagingKeys,
     recipientId,
