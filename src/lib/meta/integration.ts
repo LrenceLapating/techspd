@@ -138,6 +138,7 @@ const metaIntegrationsTable = "meta_integrations";
 const subscribedAppsGraphVersion = "v19.0";
 const facebookMessengerSubscribedFields =
   "messages,messaging_postbacks,message_echoes";
+const instagramSubscribedFields = "messages,comments,mentions";
 
 export async function getAuthenticatedMetaCompany(supabase: SupabaseClient) {
   const {
@@ -772,6 +773,91 @@ export async function subscribeConnectedFacebookWebhook({
   };
 }
 
+export async function subscribeConnectedInstagramWebhook({
+  companyId,
+}: {
+  companyId: string;
+}) {
+  const admin = createAdminClient();
+  const { data: instagramChannel, error: instagramError } = await admin
+    .from("channels")
+    .select("id, settings")
+    .eq("company_id", companyId)
+    .eq("platform", "instagram")
+    .eq("is_connected", true)
+    .order("connected_at", { ascending: false, nullsFirst: false })
+    .limit(1)
+    .single<Pick<FacebookChannelRow, "id" | "settings">>();
+
+  if (instagramError || !instagramChannel) {
+    throw new Error(
+      instagramError?.message ?? "No connected Instagram channel was found.",
+    );
+  }
+
+  const linkedPageId = readStringSetting(
+    instagramChannel.settings,
+    "linked_facebook_page_id",
+  );
+
+  if (!linkedPageId) {
+    throw new Error(
+      "Connected Instagram channel is missing its linked Facebook Page.",
+    );
+  }
+
+  const { data: facebookChannel, error: facebookError } = await admin
+    .from("channels")
+    .select("channel_id, access_token")
+    .eq("company_id", companyId)
+    .eq("platform", "facebook")
+    .eq("channel_id", linkedPageId)
+    .eq("is_connected", true)
+    .single<Pick<FacebookChannelRow, "access_token" | "channel_id">>();
+
+  if (facebookError || !facebookChannel) {
+    throw new Error(
+      facebookError?.message ??
+        "The Facebook Page linked to this Instagram channel is not connected.",
+    );
+  }
+
+  if (!facebookChannel.access_token) {
+    throw new Error(
+      "The Facebook Page linked to this Instagram channel is missing its page access token.",
+    );
+  }
+
+  const subscription = await subscribeMetaPageWebhook({
+    channelId: instagramChannel.id,
+    existingSettings: instagramChannel.settings,
+    pageAccessToken: facebookChannel.access_token,
+    pageId: linkedPageId,
+    platform: "instagram",
+    subscribedFields: instagramSubscribedFields,
+  });
+
+  if (!subscription.ok) {
+    throw Object.assign(
+      new Error(
+        subscription.payload.error?.message ??
+          "Unable to subscribe Instagram webhook.",
+      ),
+      {
+        metaError: subscription.payload.error ?? null,
+        status: subscription.status,
+      },
+    );
+  }
+
+  return {
+    channelId: instagramChannel.id,
+    pageId: linkedPageId,
+    response: subscription.payload,
+    subscribedAt: subscription.subscribedAt,
+  };
+}
+
 async function subscribeFacebookPageWebhook({
   channelId,
   existingSettings,
@@ -783,12 +869,37 @@ async function subscribeFacebookPageWebhook({
   pageAccessToken: string;
   pageId: string;
 }) {
+  return subscribeMetaPageWebhook({
+    channelId,
+    existingSettings,
+    pageAccessToken,
+    pageId,
+    platform: "facebook",
+    subscribedFields: facebookMessengerSubscribedFields,
+  });
+}
+
+async function subscribeMetaPageWebhook({
+  channelId,
+  existingSettings,
+  pageAccessToken,
+  pageId,
+  platform,
+  subscribedFields,
+}: {
+  channelId: string;
+  existingSettings: ChannelSettings | null;
+  pageAccessToken: string;
+  pageId: string;
+  platform: MetaProvider;
+  subscribedFields: string;
+}) {
   const url = new URL(
     `https://graph.facebook.com/${subscribedAppsGraphVersion}/${pageId}/subscribed_apps`,
   );
   const body = new URLSearchParams({
     access_token: pageAccessToken,
-    subscribed_fields: facebookMessengerSubscribedFields,
+    subscribed_fields: subscribedFields,
   });
 
   const response = await fetch(url, {
@@ -802,7 +913,9 @@ async function subscribeFacebookPageWebhook({
     channelId,
     metaError: payload.error ?? null,
     pageId,
+    platform,
     response: payload,
+    subscribedFields,
   });
 
   if (!response.ok || payload.error) {
@@ -842,19 +955,38 @@ function logMetaWebhookSubscription({
   channelId,
   metaError,
   pageId,
+  platform,
   response,
+  subscribedFields,
 }: {
   channelId: string;
   metaError: MetaSubscribedAppsResponse["error"] | null;
   pageId: string;
+  platform: MetaProvider;
   response: MetaSubscribedAppsResponse;
+  subscribedFields: string;
 }) {
-  console.info("[meta-webhook] Facebook subscribed_apps response.", {
+  const message =
+    platform === "facebook"
+      ? "[meta-webhook] Facebook subscribed_apps response."
+      : "[meta-webhook] Instagram subscribed_apps response.";
+
+  console.info(message, {
     channel_id: channelId,
     meta_error_response: metaError,
     page_id: pageId,
+    platform,
     subscribed_apps_response: response,
+    subscribed_fields: subscribedFields,
   });
+}
+
+function readStringSetting(
+  settings: ChannelSettings | null,
+  key: string,
+) {
+  const value = settings?.[key];
+  return typeof value === "string" && value.trim() ? value : null;
 }
 
 function readMetaEnv(key: string) {

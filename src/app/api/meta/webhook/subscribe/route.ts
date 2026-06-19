@@ -2,12 +2,13 @@ import { NextResponse } from "next/server";
 import {
   getAuthenticatedMetaCompany,
   subscribeConnectedFacebookWebhook,
+  subscribeConnectedInstagramWebhook,
 } from "@/lib/meta/integration";
 import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
 
-export async function POST() {
+export async function POST(request: Request) {
   const supabase = await createClient();
   const auth = await getAuthenticatedMetaCompany(supabase);
 
@@ -16,13 +17,19 @@ export async function POST() {
   }
 
   try {
-    const subscription = await subscribeConnectedFacebookWebhook({
-      companyId: auth.companyId,
-    });
+    const body = (await request.json().catch(() => null)) as {
+      platform?: unknown;
+    } | null;
+    const platform = body?.platform === "instagram" ? "instagram" : "facebook";
+    const subscription =
+      platform === "instagram"
+        ? await subscribeConnectedInstagramWebhook({ companyId: auth.companyId })
+        : await subscribeConnectedFacebookWebhook({ companyId: auth.companyId });
 
     return NextResponse.json({
       channel_id: subscription.channelId,
       page_id: subscription.pageId,
+      platform,
       response: subscription.response,
       webhook_subscribed: true,
       webhook_subscribed_at: subscription.subscribedAt,
@@ -33,7 +40,7 @@ export async function POST() {
         error:
           error instanceof Error
             ? error.message
-            : "Unable to subscribe Facebook Page webhook.",
+            : "Unable to subscribe Meta webhook.",
         meta_error:
           error &&
           typeof error === "object" &&

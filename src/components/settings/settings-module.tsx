@@ -225,7 +225,7 @@ function ChannelCard({
             <dd className="text-xs font-medium">{formatConnectedAt(connectedAt)}</dd>
           </div>
         ) : null}
-        {platformName === "Facebook" ? (
+        {platformName === "Facebook" || platformName === "Instagram" ? (
           <div className="flex items-center justify-between gap-3">
             <dt className="text-muted-foreground">Webhook</dt>
             <dd className="text-xs font-medium">
@@ -246,10 +246,11 @@ function ChannelCard({
         </Button>
       )}
 
-      {platformName === "Facebook" ? (
+      {platformName === "Facebook" || platformName === "Instagram" ? (
         <WebhookSubscribeButton
           disabled={!connected}
           isSubscribed={webhookSubscribed}
+          platform={platformName === "Instagram" ? "instagram" : "facebook"}
         />
       ) : null}
     </div>

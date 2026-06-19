@@ -2,11 +2,13 @@
 
 import { useState } from "react";
 import { RadioTower } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 
 type WebhookSubscribeButtonProps = {
   disabled?: boolean;
   isSubscribed?: boolean;
+  platform: "facebook" | "instagram";
 };
 
 type SubscribeState = "idle" | "loading" | "success" | "error";
@@ -14,7 +16,9 @@ type SubscribeState = "idle" | "loading" | "success" | "error";
 export function WebhookSubscribeButton({
   disabled,
   isSubscribed,
+  platform,
 }: WebhookSubscribeButtonProps) {
+  const router = useRouter();
   const [message, setMessage] = useState<string | null>(null);
   const [state, setState] = useState<SubscribeState>("idle");
 
@@ -23,6 +27,10 @@ export function WebhookSubscribeButton({
     setState("loading");
 
     const response = await fetch("/api/meta/webhook/subscribe", {
+      body: JSON.stringify({ platform }),
+      headers: {
+        "Content-Type": "application/json",
+      },
       method: "POST",
     });
     const payload = (await response.json()) as {
@@ -39,9 +47,10 @@ export function WebhookSubscribeButton({
     setMessage(
       payload.webhook_subscribed_at
         ? `Subscribed ${formatWebhookDate(payload.webhook_subscribed_at)}`
-        : "Webhook subscribed.",
+        : `${platform === "instagram" ? "Instagram" : "Facebook"} webhook subscribed.`,
     );
     setState("success");
+    router.refresh();
   }
 
   return (
