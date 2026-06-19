@@ -51,9 +51,29 @@ type RealtimeMessageRow = {
   body: string;
   company_id: string;
   conversation_id: string;
+  created_at: string;
   id: string;
+  metadata: Record<string, unknown> | null;
   sender_type: "customer" | "agent" | "owner" | "ai" | "system";
   sent_at: string;
+};
+
+type RealtimeConversationRow = {
+  company_id: string;
+  id: string;
+  last_message: string | null;
+  last_message_at: string | null;
+  unread_count: number;
+};
+
+type PendingUiLatency = {
+  body: string;
+  conversationId: string;
+  databaseInsertedAt: string;
+  messageId: string;
+  realtimeReceivedAt: string;
+  realtimeReceivedAtMs: number;
+  webhookReceivedAt: string | null;
 };
 
 export function InboxModule({
@@ -74,6 +94,12 @@ export function InboxModule({
   const selectedConversationIdRef = useRef(selectedConversationId);
   const snapshotRequestRef = useRef(0);
   const snapshotAppliedRef = useRef(0);
+  const pendingUiLatencyRef = useRef(new Map<string, PendingUiLatency>());
+  const applyRealtimeMessageRef = useRef(applyRealtimeMessage);
+  const applyRealtimeConversationRef = useRef(applyRealtimeConversation);
+
+  applyRealtimeMessageRef.current = applyRealtimeMessage;
+  applyRealtimeConversationRef.current = applyRealtimeConversation;
 
   useEffect(() => {
     conversationsRef.current = snapshot.conversations;
@@ -82,6 +108,59 @@ export function InboxModule({
   useEffect(() => {
     selectedConversationIdRef.current = selectedConversationId;
   }, [selectedConversationId]);
+
+  useEffect(() => {
+    if (pendingUiLatencyRef.current.size === 0) {
+      return;
+    }
+
+    const uiUpdatedAtMs = Date.now();
+    const uiUpdatedAt = new Date(uiUpdatedAtMs).toISOString();
+
+    for (const [messageId, timing] of pendingUiLatencyRef.current) {
+      const visibleInThread = snapshot.messages.some(
+        (message) => message.id === messageId,
+      );
+      const visibleInPreview = snapshot.conversations.some(
+        (conversation) =>
+          conversation.id === timing.conversationId &&
+          conversation.lastMessage === timing.body,
+      );
+
+      if (!visibleInThread && !visibleInPreview) {
+        continue;
+      }
+
+      const webhookReceivedAtMs = timing.webhookReceivedAt
+        ? new Date(timing.webhookReceivedAt).getTime()
+        : null;
+      const databaseInsertedAtMs = new Date(
+        timing.databaseInsertedAt,
+      ).getTime();
+
+      console.info("[TechSpd Latency] UI updated", {
+        databaseInsertedAt: timing.databaseInsertedAt,
+        databaseToRealtimeMs: elapsedMs(
+          databaseInsertedAtMs,
+          timing.realtimeReceivedAtMs,
+        ),
+        messageId,
+        realtimeReceivedAt: timing.realtimeReceivedAt,
+        realtimeToUiMs: elapsedMs(timing.realtimeReceivedAtMs, uiUpdatedAtMs),
+        totalLatencyMs:
+          webhookReceivedAtMs === null
+            ? null
+            : elapsedMs(webhookReceivedAtMs, uiUpdatedAtMs),
+        uiUpdatedAt,
+        webhookReceivedAt: timing.webhookReceivedAt,
+        webhookToDatabaseMs:
+          webhookReceivedAtMs === null
+            ? null
+            : elapsedMs(webhookReceivedAtMs, databaseInsertedAtMs),
+      });
+      pendingUiLatencyRef.current.delete(messageId);
+    }
+  }, [snapshot]);
 
   const selectedConversation = useMemo(
     () =>
@@ -175,6 +254,18 @@ export function InboxModule({
           },
           (payload) => {
             const message = payload.new as RealtimeMessageRow;
+            const realtimeReceivedAtMs = Date.now();
+            const realtimeReceivedAt = new Date(
+              realtimeReceivedAtMs,
+            ).toISOString();
+            const webhookReceivedAt = metadataTimestamp(
+              message.metadata,
+              "webhook_received_at",
+            );
+            const databaseInsertedAtMs = new Date(message.created_at).getTime();
+            const webhookReceivedAtMs = webhookReceivedAt
+              ? new Date(webhookReceivedAt).getTime()
+              : null;
 
             console.info("[TechSpd Realtime] messages INSERT payload", payload);
             console.info("[TechSpd Realtime] inserted message diagnostics", {
@@ -183,7 +274,33 @@ export function InboxModule({
               messageId: message.id,
               senderType: message.sender_type,
             });
-            void refreshInboxSnapshot("messages INSERT");
+            console.info("[TechSpd Latency] realtime payload received", {
+              databaseInsertedAt: message.created_at,
+              databaseToRealtimeMs: elapsedMs(
+                databaseInsertedAtMs,
+                realtimeReceivedAtMs,
+              ),
+              messageId: message.id,
+              realtimeReceivedAt,
+              webhookReceivedAt,
+              webhookToDatabaseMs:
+                webhookReceivedAtMs === null
+                  ? null
+                  : elapsedMs(webhookReceivedAtMs, databaseInsertedAtMs),
+              webhookToRealtimeMs:
+                webhookReceivedAtMs === null
+                  ? null
+                  : elapsedMs(webhookReceivedAtMs, realtimeReceivedAtMs),
+            });
+            applyRealtimeMessageRef.current(message, {
+              body: message.body,
+              conversationId: message.conversation_id,
+              databaseInsertedAt: message.created_at,
+              messageId: message.id,
+              realtimeReceivedAt,
+              realtimeReceivedAtMs,
+              webhookReceivedAt,
+            });
           },
         )
         .on(
@@ -194,11 +311,13 @@ export function InboxModule({
             table: "conversations",
           },
           (payload) => {
+            const conversation = payload.new as RealtimeConversationRow;
+
             console.info(
               "[TechSpd Realtime] conversations UPDATE payload",
               payload,
             );
-            void refreshInboxSnapshot("conversations UPDATE");
+            applyRealtimeConversationRef.current(conversation);
           },
         )
         .subscribe((status, error) => {
@@ -257,6 +376,100 @@ export function InboxModule({
       }
     };
   }, [companyId]);
+
+  function applyRealtimeMessage(
+    message: RealtimeMessageRow,
+    timing: PendingUiLatency,
+  ) {
+    if (message.company_id !== companyId) {
+      console.warn("[TechSpd Realtime] ignored cross-company message", {
+        currentCompanyId: companyId,
+        messageCompanyId: message.company_id,
+        messageId: message.id,
+      });
+      return;
+    }
+
+    const conversationExists = conversationsRef.current.some(
+      (conversation) => conversation.id === message.conversation_id,
+    );
+
+    pendingUiLatencyRef.current.set(message.id, timing);
+
+    if (!conversationExists) {
+      console.info("[TechSpd Realtime] snapshot recovery required", {
+        conversationId: message.conversation_id,
+        messageId: message.id,
+        reason: "unknown conversation",
+      });
+      void refreshInboxSnapshot("recovery: unknown conversation");
+      return;
+    }
+
+    setSnapshot((current) => {
+      const messageAlreadyExists = current.messages.some(
+        (item) => item.id === message.id,
+      );
+      const nextConversations = moveConversationToTop(
+        current.conversations.map((conversation) =>
+          conversation.id === message.conversation_id
+            ? {
+                ...conversation,
+                lastMessage: message.body,
+                time: "now",
+              }
+            : conversation,
+        ),
+        message.conversation_id,
+      );
+      const next = {
+        ...current,
+        conversations: nextConversations,
+        messages:
+          current.selectedConversationId === message.conversation_id &&
+          !messageAlreadyExists
+            ? [...current.messages, mapRealtimeMessage(message)]
+            : current.messages,
+      };
+
+      conversationsRef.current = nextConversations;
+      return next;
+    });
+  }
+
+  function applyRealtimeConversation(conversation: RealtimeConversationRow) {
+    if (conversation.company_id !== companyId) {
+      return;
+    }
+
+    const conversationExists = conversationsRef.current.some(
+      (item) => item.id === conversation.id,
+    );
+
+    if (!conversationExists) {
+      void refreshInboxSnapshot("recovery: unknown conversation update");
+      return;
+    }
+
+    setSnapshot((current) => {
+      const nextConversations = moveConversationToTop(
+        current.conversations.map((item) =>
+          item.id === conversation.id
+            ? {
+                ...item,
+                lastMessage: conversation.last_message ?? item.lastMessage,
+                time: conversation.last_message_at ? "now" : item.time,
+                unread: conversation.unread_count,
+              }
+            : item,
+        ),
+        conversation.id,
+      );
+
+      conversationsRef.current = nextConversations;
+      return { ...current, conversations: nextConversations };
+    });
+  }
 
   async function refreshInboxSnapshot(source: string) {
     const requestId = snapshotRequestRef.current + 1;
@@ -1251,6 +1464,27 @@ function moveConversationToTop(
     conversation,
     ...conversations.filter((item) => item.id !== conversationId),
   ];
+}
+
+function metadataTimestamp(
+  metadata: Record<string, unknown> | null,
+  key: string,
+) {
+  const value = metadata?.[key];
+
+  if (typeof value !== "string" || !Number.isFinite(new Date(value).getTime())) {
+    return null;
+  }
+
+  return value;
+}
+
+function elapsedMs(startMs: number, endMs: number) {
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+    return null;
+  }
+
+  return Math.max(0, Math.round(endMs - startMs));
 }
 
 function RealtimeBadge({ status }: { status: RealtimeStatus }) {

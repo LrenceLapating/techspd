@@ -45,7 +45,12 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const webhookReceivedAt = new Date().toISOString();
   let body: unknown;
+
+  console.info("[TechSpd Latency] webhook received", {
+    webhookReceivedAt,
+  });
 
   try {
     body = await request.json();
@@ -71,7 +76,9 @@ export async function POST(request: Request) {
 
   for (const event of events) {
     try {
-      const result = await ingestMetaWebhookMessage(event);
+      const result = await ingestMetaWebhookMessage(event, {
+        webhookReceivedAt,
+      });
       processed += 1;
 
       console.info("[meta-webhook] Message saved.", {
@@ -81,6 +88,9 @@ export async function POST(request: Request) {
         customer_id: result.customer_id,
         message_id: result.message_id,
         platform: event.platform,
+        database_inserted_at: result.database_inserted_at,
+        webhook_received_at: result.webhook_received_at,
+        webhook_to_database_ms: result.webhook_to_database_ms,
       });
     } catch (error) {
       failed += 1;

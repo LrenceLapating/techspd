@@ -90,9 +90,10 @@ for (const operation of [
   "fetchFacebookCustomerProfile",
   'url.searchParams.set("fields", "name,profile_pic")',
   'url.searchParams.set("access_token", channel.access_token)',
-  "avatar_url: profile?.avatarUrl ?? null",
-  "avatar_url: profile.avatarUrl ?? existing.avatar_url",
-  "name: profile.name ?? existing.name",
+  "updateCustomerProfile",
+  "updates.avatar_url = profile.avatarUrl",
+  "updates.name = profile.name",
+  "profilePromise",
   "Facebook User ${platformUserId}",
 ]) {
   assert(webhook.includes(operation), `Meta persistence missing: ${operation}`);

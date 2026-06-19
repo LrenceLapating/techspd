@@ -63,12 +63,24 @@ type ConversationRow = {
   id: string;
 };
 
+type ExistingMessageContextRow = {
+  channel_id: string;
+  channels: ChannelRow | ChannelRow[];
+  company_id: string;
+  customer_id: string;
+  customers: CustomerRow | CustomerRow[];
+  id: string;
+};
+
 export type MetaWebhookIngestionResult = {
   channel_id: string;
   company_id: string;
   conversation_id: string;
   customer_id: string;
+  database_inserted_at: string;
   message_id: string | null;
+  webhook_received_at: string;
+  webhook_to_database_ms: number;
 };
 
 export function parseMetaWebhookEvents(body: unknown): MetaWebhookParseResult {
@@ -116,25 +128,40 @@ export function parseMetaWebhookEvents(body: unknown): MetaWebhookParseResult {
 
 export async function ingestMetaWebhookMessage(
   event: MetaWebhookMessageEvent,
+  { webhookReceivedAt = new Date().toISOString() }: { webhookReceivedAt?: string } = {},
 ): Promise<MetaWebhookIngestionResult> {
   const supabase = createAdminClient();
-  const channel = await findConnectedChannel(event);
   const body = event.text ?? "[Attachment]";
   const customerExternalId = `${event.platform}:${event.platformUserId}`;
-  const profile = await fetchFacebookCustomerProfile({ channel, event });
-
-  const customer = await findOrCreateCustomer({
-    companyId: channel.company_id,
+  const contextLookupStartedAt = Date.now();
+  const existingContext = await findExistingMessageContext(
     event,
-    externalId: customerExternalId,
-    profile,
-  });
-  const conversation = await findOrCreateConversation({
-    body,
-    channel,
-    customerId: customer.id,
-    sentAt: event.timestamp,
-  });
+    customerExternalId,
+  );
+  let channel: ChannelRow;
+  let customer: CustomerRow;
+  let conversation: ConversationRow;
+
+  if (existingContext) {
+    channel = existingContext.channel;
+    customer = existingContext.customer;
+    conversation = { id: existingContext.conversationId };
+  } else {
+    channel = await findConnectedChannel(event);
+    customer = await findOrCreateCustomer({
+      companyId: channel.company_id,
+      event,
+      externalId: customerExternalId,
+    });
+    conversation = await findOrCreateConversation({
+      body,
+      channel,
+      customerId: customer.id,
+      sentAt: event.timestamp,
+    });
+  }
+
+  const contextLookupMs = Date.now() - contextLookupStartedAt;
 
   const { data: message, error: messageError } = await supabase
     .from("messages")
@@ -154,42 +181,118 @@ export async function ingestMetaWebhookMessage(
         platform_user_id: event.platformUserId,
         recipient_id: event.recipientId,
         source: "meta_webhook",
+        webhook_received_at: webhookReceivedAt,
       },
       sender_type: "customer",
       sent_at: event.timestamp,
     })
-    .select("id")
+    .select("id, created_at")
     .single();
 
   if (messageError) {
     throw new Error(messageError.message);
   }
 
-  await supabase
-    .from("customers")
-    .update({
-      last_activity_at: event.timestamp,
-      platform: event.platform,
-    })
-    .eq("id", customer.id)
-    .eq("company_id", channel.company_id);
+  const databaseInsertedAt = message.created_at;
+  const webhookToDatabaseMs = Math.max(
+    0,
+    new Date(databaseInsertedAt).getTime() - new Date(webhookReceivedAt).getTime(),
+  );
 
-  await supabase
-    .from("conversations")
-    .update({
-      last_message: body,
-      last_message_at: event.timestamp,
-      status: "open",
-    })
-    .eq("id", conversation.id)
-    .eq("company_id", channel.company_id);
+  console.info("[TechSpd Latency] message inserted", {
+    databaseInsertedAt,
+    contextLookupMs,
+    fastPath: Boolean(existingContext),
+    messageId: message.id,
+    webhookReceivedAt,
+    webhookToDatabaseMs,
+  });
+
+  const profilePromise = fetchFacebookCustomerProfile({ channel, event }).then(
+    (profile) =>
+      profile
+        ? updateCustomerProfile({
+            companyId: channel.company_id,
+            customerId: customer.id,
+            profile,
+          })
+        : undefined,
+  );
+
+  await Promise.all([
+    supabase
+      .from("customers")
+      .update({
+        last_activity_at: event.timestamp,
+        platform: event.platform,
+      })
+      .eq("id", customer.id)
+      .eq("company_id", channel.company_id),
+    supabase
+      .from("conversations")
+      .update({
+        last_message: body,
+        last_message_at: event.timestamp,
+        status: "open",
+      })
+      .eq("id", conversation.id)
+      .eq("company_id", channel.company_id),
+    profilePromise,
+  ]);
 
   return {
     channel_id: channel.id,
     company_id: channel.company_id,
     conversation_id: conversation.id,
     customer_id: customer.id,
-    message_id: message?.id ?? null,
+    database_inserted_at: databaseInsertedAt,
+    message_id: message.id,
+    webhook_received_at: webhookReceivedAt,
+    webhook_to_database_ms: webhookToDatabaseMs,
+  };
+}
+
+async function findExistingMessageContext(
+  event: MetaWebhookMessageEvent,
+  customerExternalId: string,
+) {
+  const supabase = createAdminClient();
+  const { data, error } = await supabase
+    .from("conversations")
+    .select(
+      "id, company_id, customer_id, channel_id, channels!inner(id,company_id,platform,channel_id,channel_name,external_id,access_token,is_connected), customers!inner(id,ai_enabled,name,avatar_url,external_id)",
+    )
+    .eq("channels.platform", event.platform)
+    .eq("channels.channel_id", event.channelId)
+    .eq("channels.is_connected", true)
+    .eq("customers.external_id", customerExternalId)
+    .in("status", ["open", "pending"])
+    .order("last_message_at", { ascending: false, nullsFirst: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!data) {
+    return null;
+  }
+
+  const row = data as ExistingMessageContextRow;
+  const channel = Array.isArray(row.channels) ? row.channels[0] : row.channels;
+  const customer = Array.isArray(row.customers)
+    ? row.customers[0]
+    : row.customers;
+
+  if (!channel || !customer) {
+    return null;
+  }
+
+  return {
+    channel,
+    conversationId: row.id,
+    customer,
   };
 }
 
@@ -241,12 +344,10 @@ async function findOrCreateCustomer({
   companyId,
   event,
   externalId,
-  profile,
 }: {
   companyId: string;
   event: MetaWebhookMessageEvent;
   externalId: string;
-  profile: FacebookCustomerProfile | null;
 }) {
   const supabase = createAdminClient();
 
@@ -262,28 +363,13 @@ async function findOrCreateCustomer({
   }
 
   if (existing) {
-    if (profile) {
-      const { error: updateError } = await supabase
-        .from("customers")
-        .update({
-          avatar_url: profile.avatarUrl ?? existing.avatar_url,
-          name: profile.name ?? existing.name,
-        })
-        .eq("id", existing.id)
-        .eq("company_id", companyId);
-
-      if (updateError) {
-        throw new Error(updateError.message);
-      }
-    }
-
     return existing as CustomerRow;
   }
 
   const { data, error } = await supabase
     .from("customers")
     .insert({
-      avatar_url: profile?.avatarUrl ?? null,
+      avatar_url: null,
       company_id: companyId,
       external_id: externalId,
       last_activity_at: event.timestamp,
@@ -291,9 +377,7 @@ async function findOrCreateCustomer({
         platform_user_id: event.platformUserId,
         source: "meta_webhook",
       },
-      name:
-        profile?.name ??
-        fallbackCustomerName(event.platform, event.platformUserId),
+      name: fallbackCustomerName(event.platform, event.platformUserId),
       platform: event.platform,
     })
     .select("id, ai_enabled")
@@ -304,6 +388,44 @@ async function findOrCreateCustomer({
   }
 
   return data as CustomerRow;
+}
+
+async function updateCustomerProfile({
+  companyId,
+  customerId,
+  profile,
+}: {
+  companyId: string;
+  customerId: string;
+  profile: FacebookCustomerProfile;
+}) {
+  const supabase = createAdminClient();
+  const updates: { avatar_url?: string; name?: string } = {};
+
+  if (profile.avatarUrl) {
+    updates.avatar_url = profile.avatarUrl;
+  }
+
+  if (profile.name) {
+    updates.name = profile.name;
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return;
+  }
+
+  const { error } = await supabase
+    .from("customers")
+    .update(updates)
+    .eq("id", customerId)
+    .eq("company_id", companyId);
+
+  if (error) {
+    console.warn("[meta-webhook] Customer profile update failed.", {
+      customer_id: customerId,
+      error: error.message,
+    });
+  }
 }
 
 async function fetchFacebookCustomerProfile({
