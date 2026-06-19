@@ -52,6 +52,14 @@ for (const pattern of [
   "messaging_keys",
   "changes_keys",
   "reason_ignored",
+  "message_is_echo",
+  "message_text",
+  "sender_id",
+  "recipient_id",
+  "channel_id_matched",
+  "platform_resolved",
+  "final_decision",
+  "Instagram message decision.",
 ]) {
   assert(route.includes(pattern), `Meta webhook route missing: ${pattern}`);
 }
@@ -68,11 +76,14 @@ for (const pattern of [
   "message",
   "is_echo",
   "attachments",
-  "message.text",
+  "message?.text",
   "message.mid",
   "pageId",
   "instagramId",
   "platformUserId === recipientId",
+  'platform === "facebook" && platformUserId === recipientId',
+  "message?.is_echo === true",
+  "matched_channel_id",
   "entry_has_changes_but_no_messaging",
   "entry_has_no_messaging",
   "metaChannelIdentifiers",
@@ -140,6 +151,10 @@ assert(
 assert(
   inboxModule.includes("<CustomerAvatar conversation={conversation}"),
   "Inbox must render the customer profile photo.",
+);
+assert(
+  !webhook.includes("if (platformUserId === recipientId)"),
+  "Instagram messages must not be rejected from sender/recipient equality alone.",
 );
 assert(
   envExample.includes("META_WEBHOOK_VERIFY_TOKEN="),

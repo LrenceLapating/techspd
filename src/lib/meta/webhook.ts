@@ -13,6 +13,7 @@ export type MetaWebhookMessageEvent = {
   channelId: string;
   entryId: string | null;
   instagramId: string | null;
+  messageIsEcho: boolean;
   messageId: string | null;
   pageId: string | null;
   platform: MetaWebhookPlatform;
@@ -33,8 +34,12 @@ export type MetaWebhookIgnoredEvent = {
   changesKeys: string[];
   entryId: string | null;
   entryKeys: string[];
+  messageIsEcho: boolean | null;
+  messageText: string | null;
   messagingKeys: string[];
+  recipientId: string | null;
   reason: string;
+  senderId: string | null;
 };
 
 type ChannelRow = {
@@ -90,6 +95,7 @@ export type MetaWebhookIngestionResult = {
   customer_id: string;
   database_inserted_at: string;
   message_id: string | null;
+  matched_channel_id: string;
   webhook_received_at: string;
   webhook_to_database_ms: number;
 };
@@ -185,8 +191,12 @@ export function parseMetaWebhookEvents(body: unknown): MetaWebhookParseResult {
             changesKeys,
             entryId,
             entryKeys,
+            messageIsEcho: parsed.messageIsEcho,
+            messageText: parsed.messageText,
             messagingKeys,
+            recipientId: parsed.recipientId,
             reason: parsed.reason,
+            senderId: parsed.senderId,
           }),
         );
       }
@@ -317,6 +327,8 @@ export async function ingestMetaWebhookMessage(
     customer_id: customer.id,
     database_inserted_at: databaseInsertedAt,
     message_id: message.id,
+    matched_channel_id:
+      channel.channel_id ?? channel.external_id ?? event.channelId,
     webhook_received_at: webhookReceivedAt,
     webhook_to_database_ms: webhookToDatabaseMs,
   };
@@ -610,7 +622,7 @@ function parseMessagingEvent({
   platform: MetaWebhookPlatform;
 }) {
   if (!isRecord(messagingEvent)) {
-    return { event: null, reason: "messaging_event_is_not_an_object" } as const;
+    return ignoredMessagingEvent("messaging_event_is_not_an_object");
   }
 
   const sender = isRecord(messagingEvent.sender) ? messagingEvent.sender : null;
@@ -620,33 +632,43 @@ function parseMessagingEvent({
   const message = isRecord(messagingEvent.message) ? messagingEvent.message : null;
   const platformUserId = optionalString(sender?.id);
   const recipientId = optionalString(recipient?.id) ?? entryId;
-  const isEcho = message?.is_echo === true;
+  const messageIsEcho = message?.is_echo === true;
+  const messageText = optionalString(message?.text);
+  const messageDetails = {
+    messageIsEcho,
+    messageText,
+    recipientId,
+    senderId: platformUserId,
+  };
 
   if (!message) {
-    return { event: null, reason: "message_is_missing" } as const;
+    return ignoredMessagingEvent("message_is_missing", messageDetails);
   }
 
   if (!platformUserId) {
-    return { event: null, reason: "sender_id_is_missing" } as const;
+    return ignoredMessagingEvent("sender_id_is_missing", messageDetails);
   }
 
   if (!recipientId) {
-    return { event: null, reason: "recipient_id_is_missing" } as const;
+    return ignoredMessagingEvent("recipient_id_is_missing", messageDetails);
   }
 
-  if (isEcho) {
-    return { event: null, reason: "message_is_echo" } as const;
+  if (messageIsEcho) {
+    return ignoredMessagingEvent("message_is_echo", messageDetails);
   }
 
-  if (platformUserId === recipientId) {
-    return { event: null, reason: "sender_matches_recipient" } as const;
+  if (platform === "facebook" && platformUserId === recipientId) {
+    return ignoredMessagingEvent("sender_matches_recipient", messageDetails);
   }
 
-  const text = optionalString(message.text);
+  const text = messageText;
   const attachments = parseAttachments(message.attachments);
 
   if (!text && attachments.length === 0) {
-    return { event: null, reason: "message_has_no_text_or_attachments" } as const;
+    return ignoredMessagingEvent(
+      "message_has_no_text_or_attachments",
+      messageDetails,
+    );
   }
 
   const channelId = platform === "instagram" ? (entryId ?? recipientId) : recipientId;
@@ -657,6 +679,7 @@ function parseMessagingEvent({
       channelId,
       entryId,
       instagramId: platform === "instagram" ? channelId : null,
+      messageIsEcho,
       messageId: optionalString(message.mid),
       pageId: platform === "facebook" ? channelId : null,
       platform,
@@ -665,7 +688,29 @@ function parseMessagingEvent({
       text,
       timestamp: timestampFromValue(messagingEvent.timestamp, fallbackTimestamp),
     } satisfies MetaWebhookMessageEvent,
+    ...messageDetails,
     reason: null,
+  } as const;
+}
+
+function ignoredMessagingEvent(
+  reason: string,
+  details: {
+    messageIsEcho: boolean;
+    messageText: string | null;
+    recipientId: string | null;
+    senderId: string | null;
+  } = {
+    messageIsEcho: false,
+    messageText: null,
+    recipientId: null,
+    senderId: null,
+  },
+) {
+  return {
+    event: null,
+    ...details,
+    reason,
   } as const;
 }
 
@@ -684,16 +729,24 @@ function ignoredEvent({
   changesKeys = [],
   entryId = null,
   entryKeys = [],
+  messageIsEcho = null,
+  messageText = null,
   messagingKeys = [],
+  recipientId = null,
   reason,
+  senderId = null,
 }: Partial<Omit<MetaWebhookIgnoredEvent, "reason">> & { reason: string }) {
   return {
     bodyObject,
     changesKeys,
     entryId,
     entryKeys,
+    messageIsEcho,
+    messageText,
     messagingKeys,
+    recipientId,
     reason,
+    senderId,
   } satisfies MetaWebhookIgnoredEvent;
 }
 

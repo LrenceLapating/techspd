@@ -4,6 +4,7 @@ import {
   ingestMetaWebhookMessage,
   parseMetaWebhookEvents,
 } from "@/lib/meta/webhook";
+import type { MetaWebhookMessageEvent } from "@/lib/meta/webhook";
 
 export const runtime = "nodejs";
 
@@ -84,8 +85,16 @@ export async function POST(request: Request) {
       changes_keys: ignoredEvent.changesKeys,
       entry_id: ignoredEvent.entryId,
       entry_keys: ignoredEvent.entryKeys,
+      final_decision: "ignored",
+      message_is_echo: ignoredEvent.messageIsEcho,
+      message_text: ignoredEvent.messageText,
       messaging_keys: ignoredEvent.messagingKeys,
+      platform_resolved:
+        ignoredEvent.bodyObject === "instagram" ? "instagram" : null,
+      recipient_id: ignoredEvent.recipientId,
       reason_ignored: ignoredEvent.reason,
+      sender_id: ignoredEvent.senderId,
+      channel_id_matched: null,
     });
   }
 
@@ -107,6 +116,14 @@ export async function POST(request: Request) {
         webhook_received_at: result.webhook_received_at,
         webhook_to_database_ms: result.webhook_to_database_ms,
       });
+
+      if (event.platform === "instagram") {
+        logInstagramMessageDecision({
+          channelIdMatched: result.matched_channel_id,
+          decision: "saved",
+          event,
+        });
+      }
     } catch (error) {
       failed += 1;
 
@@ -116,6 +133,14 @@ export async function POST(request: Request) {
         message_id: event.messageId,
         platform: event.platform,
       });
+
+      if (event.platform === "instagram") {
+        logInstagramMessageDecision({
+          channelIdMatched: null,
+          decision: "failed",
+          event,
+        });
+      }
     }
   }
 
@@ -124,6 +149,28 @@ export async function POST(request: Request) {
     ignored,
     processed,
     received: true,
+  });
+}
+
+function logInstagramMessageDecision({
+  channelIdMatched,
+  decision,
+  event,
+}: {
+  channelIdMatched: string | null;
+  decision: "failed" | "saved";
+  event: MetaWebhookMessageEvent;
+}) {
+  console.info("[meta-webhook] Instagram message decision.", {
+    body_object: "instagram",
+    channel_id_matched: channelIdMatched,
+    entry_id: event.entryId,
+    final_decision: decision,
+    message_is_echo: event.messageIsEcho,
+    message_text: event.text,
+    platform_resolved: event.platform,
+    recipient_id: event.recipientId,
+    sender_id: event.platformUserId,
   });
 }
 
