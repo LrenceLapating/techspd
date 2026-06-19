@@ -129,6 +129,10 @@ const checks = [
       "conversationIds.includes(requestedSelectedConversationId)",
       "last_read_at",
       "unread_count",
+      "total_facebook_conversations",
+      "total_instagram_conversations",
+      "raw_query_result",
+      "channels(name,type,platform,channel_id)",
     ],
   },
   {

@@ -241,6 +241,27 @@ export async function ingestMetaWebhookMessage(
     });
   }
 
+  logMetaFlowTrace({
+    channel,
+    event,
+    result: "matched",
+    stage: "channel_lookup",
+  });
+  logMetaFlowTrace({
+    channel,
+    event,
+    recordId: customer.id,
+    result: existingContext ? "existing" : "resolved",
+    stage: "customer_lookup",
+  });
+  logMetaFlowTrace({
+    channel,
+    event,
+    recordId: conversation.id,
+    result: existingContext ? "existing" : "resolved",
+    stage: "conversation_lookup",
+  });
+
   const contextLookupMs = Date.now() - contextLookupStartedAt;
 
   const { data: message, error: messageError } = await supabase
@@ -272,6 +293,14 @@ export async function ingestMetaWebhookMessage(
   if (messageError) {
     throw new Error(messageError.message);
   }
+
+  logMetaFlowTrace({
+    channel,
+    event,
+    recordId: message.id,
+    result: "inserted",
+    stage: "message_insert",
+  });
 
   const databaseInsertedAt = message.created_at;
   const webhookToDatabaseMs = Math.max(
@@ -332,6 +361,37 @@ export async function ingestMetaWebhookMessage(
     webhook_received_at: webhookReceivedAt,
     webhook_to_database_ms: webhookToDatabaseMs,
   };
+}
+
+function logMetaFlowTrace({
+  channel,
+  event,
+  recordId = null,
+  result,
+  stage,
+}: {
+  channel: ChannelRow;
+  event: MetaWebhookMessageEvent;
+  recordId?: string | null;
+  result: "existing" | "inserted" | "matched" | "resolved";
+  stage:
+    | "channel_lookup"
+    | "conversation_lookup"
+    | "customer_lookup"
+    | "message_insert";
+}) {
+  console.info("[meta-webhook] Flow trace.", {
+    channel_id_matched: channel.channel_id ?? channel.external_id,
+    company_id: channel.company_id,
+    entry_id: event.entryId,
+    internal_channel_id: channel.id,
+    platform_resolved: event.platform,
+    recipient_id: event.recipientId,
+    record_id: recordId,
+    result,
+    sender_id: event.platformUserId,
+    stage,
+  });
 }
 
 async function findExistingMessageContext(

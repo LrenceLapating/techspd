@@ -42,11 +42,15 @@ type ConversationRow = {
   channel_id: string | null;
   channels:
     | {
+        channel_id: string | null;
         name: string | null;
+        platform: string | null;
         type: string | null;
       }
     | {
+        channel_id: string | null;
         name: string | null;
+        platform: string | null;
         type: string | null;
       }[]
     | null;
@@ -104,7 +108,7 @@ export async function getInboxSnapshot({
   const { data: conversationsData, error: conversationsError } = await supabase
     .from("conversations")
     .select(
-      "id, customer_id, channel_id, last_message_at, last_read_at, unread_count, updated_at, customers(name,avatar_url,email,phone,location,platform,ai_enabled,lead_stage,metadata), channels(name,type)",
+      "id, customer_id, channel_id, last_message_at, last_read_at, unread_count, updated_at, customers(name,avatar_url,email,phone,location,platform,ai_enabled,lead_stage,metadata), channels(name,type,platform,channel_id)",
     )
     .eq("company_id", companyId)
     .order("last_message_at", { ascending: false, nullsFirst: false })
@@ -112,6 +116,10 @@ export async function getInboxSnapshot({
     .limit(30);
 
   if (conversationsError) {
+    console.error("[inbox-snapshot] Conversation query failed.", {
+      company_id: companyId,
+      error: conversationsError,
+    });
     return {
       conversations: [],
       messages: [],
@@ -120,6 +128,38 @@ export async function getInboxSnapshot({
   }
 
   const conversationRows = (conversationsData ?? []) as ConversationRow[];
+  const platformCounts = conversationRows.reduce(
+    (counts, conversation) => {
+      const platform = conversationPlatform(conversation);
+      counts[platform] = (counts[platform] ?? 0) + 1;
+      return counts;
+    },
+    {} as Record<string, number>,
+  );
+
+  console.info("[inbox-snapshot] Conversation query result.", {
+    company_id: companyId,
+    total_facebook_conversations: platformCounts.Facebook ?? 0,
+    total_instagram_conversations: platformCounts.Instagram ?? 0,
+    total_conversations: conversationRows.length,
+    raw_query_result: conversationRows.map((conversation) => {
+      const channel = Array.isArray(conversation.channels)
+        ? conversation.channels[0]
+        : conversation.channels;
+      const customer = Array.isArray(conversation.customers)
+        ? conversation.customers[0]
+        : conversation.customers;
+
+      return {
+        channel_id: conversation.channel_id,
+        channel_platform: channel?.platform ?? null,
+        conversation_id: conversation.id,
+        customer_id: conversation.customer_id,
+        customer_platform: customer?.platform ?? null,
+        last_message_at: conversation.last_message_at,
+      };
+    }),
+  });
   const conversationIds = conversationRows.map((conversation) => conversation.id);
   const selectedConversationId =
     requestedSelectedConversationId &&
@@ -196,10 +236,7 @@ function mapConversation(
   const customer = Array.isArray(conversation.customers)
     ? conversation.customers[0]
     : conversation.customers;
-  const channel = Array.isArray(conversation.channels)
-    ? conversation.channels[0]
-    : conversation.channels;
-  const platform = platformLabel(customer?.platform ?? channel?.name ?? channel?.type);
+  const platform = conversationPlatform(conversation);
   const name = customer?.name ?? "Unknown customer";
 
   return {
@@ -223,6 +260,19 @@ function mapConversation(
     time: relativeTime(latestMessage?.sent_at ?? conversation.last_message_at),
     unread: conversation.unread_count,
   };
+}
+
+function conversationPlatform(conversation: ConversationRow) {
+  const customer = Array.isArray(conversation.customers)
+    ? conversation.customers[0]
+    : conversation.customers;
+  const channel = Array.isArray(conversation.channels)
+    ? conversation.channels[0]
+    : conversation.channels;
+
+  return platformLabel(
+    customer?.platform ?? channel?.platform ?? channel?.name ?? channel?.type,
+  );
 }
 
 function mapMessage(message: MessageRow): InboxMessage {

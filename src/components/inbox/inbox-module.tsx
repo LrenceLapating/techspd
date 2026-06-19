@@ -510,6 +510,12 @@ export function InboxModule({
 
       console.info("[TechSpd Realtime] snapshot refreshed", {
         conversationCount: refreshed.conversations.length,
+        facebookConversationCount: refreshed.conversations.filter(
+          (conversation) => conversation.platform === "Facebook",
+        ).length,
+        instagramConversationCount: refreshed.conversations.filter(
+          (conversation) => conversation.platform === "Instagram",
+        ).length,
         source,
         selectedConversationId: refreshed.selectedConversationId,
       });

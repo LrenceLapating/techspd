@@ -99,6 +99,16 @@ export async function POST(request: Request) {
   }
 
   for (const event of events) {
+    console.info("[meta-webhook] Flow trace.", {
+      body_object: event.platform === "instagram" ? "instagram" : "page",
+      channel_lookup_result: "pending",
+      entry_id: event.entryId,
+      platform_resolved: event.platform,
+      recipient_id: event.recipientId,
+      sender_id: event.platformUserId,
+      stage: "webhook_event",
+    });
+
     try {
       const result = await ingestMetaWebhookMessage(event, {
         webhookReceivedAt,
