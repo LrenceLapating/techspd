@@ -138,7 +138,7 @@ const metaIntegrationsTable = "meta_integrations";
 const subscribedAppsGraphVersion = "v19.0";
 const facebookMessengerSubscribedFields =
   "messages,messaging_postbacks,message_echoes";
-const instagramSubscribedFields = "messages,comments,mentions";
+const instagramSubscribedFields = "messages,message_echoes,message_reads";
 
 export async function getAuthenticatedMetaCompany(supabase: SupabaseClient) {
   const {

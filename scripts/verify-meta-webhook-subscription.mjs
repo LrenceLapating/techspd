@@ -8,7 +8,7 @@ const checks = [
       "subscribeFacebookPageWebhook",
       "subscribeConnectedInstagramWebhook",
       "instagramSubscribedFields",
-      '"messages,comments,mentions"',
+      '"messages,message_echoes,message_reads"',
       '"linked_facebook_page_id"',
       '.eq("channel_id", linkedPageId)',
       'platform: "instagram"',
@@ -88,6 +88,13 @@ const checks = [
 
 const failures = [];
 
+const forbiddenPatterns = [
+  {
+    file: "src/lib/meta/integration.ts",
+    patterns: ['const instagramSubscribedFields = "messages,comments,mentions"'],
+  },
+];
+
 for (const check of checks) {
   if (!existsSync(check.file)) {
     failures.push(`Cannot inspect missing file: ${check.file}`);
@@ -99,6 +106,16 @@ for (const check of checks) {
   for (const pattern of check.patterns) {
     if (!text.includes(pattern)) {
       failures.push(`${check.file} is missing pattern: ${pattern}`);
+    }
+  }
+}
+
+for (const check of forbiddenPatterns) {
+  const text = readFileSync(check.file, "utf8");
+
+  for (const pattern of check.patterns) {
+    if (text.includes(pattern)) {
+      failures.push(`${check.file} still contains forbidden pattern: ${pattern}`);
     }
   }
 }
